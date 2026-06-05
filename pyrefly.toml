@@ -1,0 +1,14 @@
+# Pyrefly configuration for JB Rock Bolts backend
+# Points Pyrefly to the project's virtual environment so it can resolve
+# pydantic, fastapi, sqlalchemy, etc. correctly.
+
+python_interpreter = ".venv/Scripts/python.exe"
+
+# Exclude Pyrefly's own in-memory virtual files from analysis
+exclude = [
+    "__pyrefly_virtual__/**",
+    ".venv/**",
+    "**/__pycache__/**",
+    "uploads/**",
+    "scratch/**",
+]

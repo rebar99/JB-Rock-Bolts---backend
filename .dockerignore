@@ -1,0 +1,33 @@
+.git
+.env
+.env.*
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.venv
+venv
+env
+*.egg-info
+.ruff_cache
+.mypy_cache
+
+# Dev/debug scripts (not needed in prod image)
+test_*.py
+debug_*.py
+verify_*.py
+migrate_*.py
+check_*.py
+inspect_*.py
+fix_*.py
+final_*.py
+raw_*.py
+update_*.py
+
+# Docs
+*.md
+README*
+
+# Local uploads (mounted at runtime in prod)
+uploads/

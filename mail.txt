@@ -1,0 +1,32 @@
+Hi
+We are developing an internal application for our company that will be used only by a limited number of employees (approximately 5 users).
+To ensure secure and proper authentication, I would like to use our company’s Microsoft-based login system (Outlook accounts) instead of building a separate login mechanism.
+
+For this, I need your help with setting up authentication using Microsoft Entra ID.
+
+### Request Details:
+
+* Register a new application in Entra ID (App Registration)
+* Configure it as **Single Tenant** (accessible only within our organization)
+* Enable authentication using **OpenID Connect / OAuth 2.0**
+* Provide the following details after setup:
+
+  * Client ID
+  * Tenant ID
+  * Client Secret (if required)
+* Configure a **redirect URI** (I will share this once confirmed)
+
+### Access Restriction:
+
+* Only selected users (around 5 employees) should be able to access the application
+* This can be done either by:
+
+  * Creating a **Security Group** in Entra ID and adding those users, OR
+  * Allowing only specific user accounts
+
+### Goal:
+
+* Users will log in using their company Outlook email
+* No separate password storage will be required
+* Access will be restricted to authorized employees only
+
