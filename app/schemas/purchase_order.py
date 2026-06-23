@@ -1,6 +1,7 @@
 from pydantic import BaseModel, computed_field
 from datetime import datetime
 from typing import Optional, List
+from app.schemas.base import UTCDatetime, OptUTCDatetime
 
 class POLineItemBase(BaseModel):
     item: str
@@ -90,11 +91,11 @@ class PurchaseOrderUpdate(BaseModel):
 
 class PurchaseOrderOut(PurchaseOrderBase):
     id: int
-    created_at: datetime
+    created_at: UTCDatetime
     created_by: Optional[str] = None
-    last_opened_at: Optional[datetime] = None
+    last_opened_at: Optional[UTCDatetime] = None
     last_opened_by: Optional[str] = None
-    last_updated_at: Optional[datetime] = None
+    last_updated_at: Optional[UTCDatetime] = None
     last_updated_by: Optional[str] = None
     line_items: List[POLineItemOut] = []
 

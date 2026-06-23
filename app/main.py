@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from fastapi.staticfiles import StaticFiles
+import asyncio
 import logging
 import os
 
@@ -31,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app import notifications
+    notifications.init_loop(asyncio.get_running_loop())
     logger.info("Starting JB Rock Bolts API...")
     create_database_if_not_exists()
     Base.metadata.create_all(bind=engine)
@@ -176,11 +179,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount local uploads only when R2 is not configured (local development)
-if not settings.r2_enabled:
-    UPLOAD_DIR = "uploads"
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+# Ensure uploads directory exists
+UPLOAD_DIR = "uploads"
+if not os.path.exists(UPLOAD_DIR):
+    os.makedirs(UPLOAD_DIR)
+
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 app.include_router(constants.router)
 app.include_router(dashboard.router)

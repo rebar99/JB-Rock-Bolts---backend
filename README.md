@@ -64,7 +64,6 @@ copy .env.example .env       # Windows
 
 # 5. Start the server
 .\.venv\Scripts\Activate.ps1      # Windows PowerShell
-python -m uvicorn app.main:app --reload --port 8000
 ```
 
 > You can also run directly from the repository root:

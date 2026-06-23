@@ -2,6 +2,7 @@ from pydantic import BaseModel, computed_field
 from datetime import datetime
 from typing import Optional, List
 from app.models.models import PaymentStatus
+from app.schemas.base import UTCDatetime, OptUTCDatetime
 
 
 class SaleActivityCreate(BaseModel):
@@ -17,7 +18,7 @@ class SaleActivityOut(BaseModel):
     action: str
     note: Optional[str] = None
     payment_status: Optional[str] = None
-    at: datetime
+    at: UTCDatetime
     by: Optional[str] = None
 
     model_config = {"from_attributes": True}
@@ -109,9 +110,9 @@ class SaleOut(BaseModel):
     grand_total: float
     payment_status: PaymentStatus
     payment_note: Optional[str] = None
-    created_at: datetime
+    created_at: UTCDatetime
     created_by: Optional[str] = None
-    updated_at: Optional[datetime] = None
+    updated_at: Optional[UTCDatetime] = None
     updated_by: Optional[str] = None
     invoice_url: Optional[str] = None
     e_way_bill_url: Optional[str] = None

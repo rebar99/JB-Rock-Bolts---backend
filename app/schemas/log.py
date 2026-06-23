@@ -1,6 +1,6 @@
 from pydantic import BaseModel
-from datetime import datetime
 from typing import Optional
+from app.schemas.base import UTCDatetime
 
 
 class SystemLogOut(BaseModel):
@@ -10,6 +10,6 @@ class SystemLogOut(BaseModel):
     entity_id: Optional[int]
     details: Optional[str]
     user: Optional[str]
-    created_at: datetime
+    created_at: UTCDatetime
 
     model_config = {"from_attributes": True}

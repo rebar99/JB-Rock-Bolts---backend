@@ -12,11 +12,6 @@ class Base(DeclarativeBase):
 
 
 def create_database_if_not_exists():
-    # Railway and other managed hosts pre-create the database — skip creation.
-    if settings.MYSQL_URL:
-        logger.info("Using external database URL — skipping CREATE DATABASE.")
-        return
-
     engine_no_db = create_engine(settings.DATABASE_URL_WITHOUT_DB, echo=False)
     try:
         with engine_no_db.connect() as conn:
@@ -27,7 +22,8 @@ def create_database_if_not_exists():
             conn.commit()
         logger.info(f"Database '{settings.DB_NAME}' ready.")
     except OperationalError as e:
-        logger.warning(f"Could not create database '{settings.DB_NAME}': {e}. Assuming it already exists.")
+        logger.error(f"Cannot connect to MySQL: {e}")
+        raise
     finally:
         engine_no_db.dispose()
 

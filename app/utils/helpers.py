@@ -45,6 +45,7 @@ def log_activity(
     entity_id: int = None,
 ):
     from app.models.models import SystemLog
+    from app import notifications
     try:
         log_entry = SystemLog(
             action=action,
@@ -55,7 +56,9 @@ def log_activity(
         )
         db.add(log_entry)
         db.commit()
+        db.refresh(log_entry)  # populate id and created_at before broadcasting
+        notifications.broadcast(log_entry)
     except Exception as e:
-        # We don't want logging failures to break the main application flow
+        # Logging failures must never break the main application flow
         print(f"Failed to log activity: {e}")
         db.rollback()
