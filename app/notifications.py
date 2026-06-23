@@ -45,7 +45,7 @@ def broadcast(log_entry) -> None:
 
     dt = log_entry.created_at
     if dt is not None and dt.tzinfo is None:
-        dt = dt.replace(tzinfo=IST)
+        dt = dt.replace(tzinfo=timezone.utc)
 
     payload = json.dumps({
         "id":          log_entry.id,
