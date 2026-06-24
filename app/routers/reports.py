@@ -44,8 +44,7 @@ def get_report(
     rows = []
     total_revenue = 0
     for s in sales:
-        items_sum = sum((float(it.subtotal or 0) + float(it.gst_amount or 0)) for it in s.items)
-        row_price = items_sum + float(s.freight or 0)
+        row_price = float(s.grand_total or 0)
         total_revenue += row_price
 
         rows.append(ReportRow(
@@ -58,6 +57,8 @@ def get_report(
             invoice_number=s.invoice_number,
             e_way_bill_no=s.e_way_bill_no,
             price=row_price,
+            subtotal=round(float(s.subtotal or 0), 2),
+            gst_amount=round(float(s.gst_amount or 0), 2),
             payment_status=s.payment_status.value if hasattr(s.payment_status, 'value') else str(s.payment_status),
             delivery_status="Dispatched",
         ))
@@ -97,6 +98,7 @@ def get_fulfillment_report(
     rows = [
         FulfillmentReportRow(
             id=o.id,
+            po_number=o.po_number,
             date=o.created_at.strftime("%d-%m-%Y") if o.created_at else "—",
             client_name=o.client_name,
             project=o.project or "—",
@@ -155,7 +157,11 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
             pending_gst=round(p_gst, 2),
             pending_total=round(p_total, 2),
             status=o.delivery_status,
-            date=o.created_at.strftime("%d-%m-%Y") if o.created_at else "—"
+            date=o.created_at.strftime("%d-%m-%Y") if o.created_at else "—",
+            uom=o.uom or "Nos",
+            total_qty=round(t_qty, 2),
+            delivered_qty=round(d_qty, 2),
+            pending_qty=round(max(0, t_qty - d_qty), 2),
         ))
 
     return PendingPOReportOut(

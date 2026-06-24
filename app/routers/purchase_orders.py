@@ -5,7 +5,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from app.database import get_db
 from app.models.models import PurchaseOrder, POLineItem
-from app.schemas.purchase_order import PurchaseOrderCreate, PurchaseOrderUpdate, PurchaseOrderOut
+from app.schemas.purchase_order import PurchaseOrderCreate, PurchaseOrderUpdate, PurchaseOrderOut, PurchaseOrderShortClose
 from app.utils.helpers import log_activity
 from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
@@ -310,6 +310,12 @@ def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, db: Session 
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found.")
 
+    if po.short_closed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot update a Short Closed Purchase Order."
+        )
+
     update_data = payload.model_dump(exclude_unset=True, exclude={"line_items"})
     changed_fields = []
     for field, value in update_data.items():
@@ -371,6 +377,40 @@ def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, db: Session 
         details_str += f" Changed fields: {', '.join(changed_fields)}"
 
     log_activity(db, "PO Updated", "PurchaseOrder", details_str, po.last_updated_by or "System", po.id)
+    return po
+
+
+@router.post("/{po_id}/short-close", response_model=PurchaseOrderOut)
+def short_close_purchase_order(po_id: int, payload: PurchaseOrderShortClose, db: Session = Depends(get_db)):
+    po = db.get(PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found.")
+
+    if po.short_closed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Purchase Order is already Short Closed."
+        )
+
+    if po.delivery_status == "Delivered":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot Short Close a fully delivered Purchase Order."
+        )
+
+    po.short_closed = True
+    po.short_closed_at = datetime.utcnow()
+    po.short_closed_by = payload.user
+    po.short_closed_remark = payload.remark
+
+    db.commit()
+    db.refresh(po)
+
+    details = f"Short Closed PO {po.po_number}."
+    if payload.remark:
+        details += f" Reason: {payload.remark}"
+
+    log_activity(db, "PO Short Closed", "PurchaseOrder", details, payload.user or "System", po.id)
     return po
 
 

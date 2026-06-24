@@ -353,6 +353,12 @@ def get_po_document(po_id: int, db: Session = Depends(get_db)):
     <b>IN WORDS: {words}</b>
   </div>
 
+  {f"""<!-- ── REMARKS ────────────────────────────────────────── -->
+  <div style="margin-top:14px;font-size:11px;">
+    <h4 style="font-size:12px;margin-bottom:6px;text-decoration:underline;font-weight:700">Remarks:</h4>
+    <div style="border:1px solid #ccc;padding:8px 12px;background:#f9f9f9;border-radius:4px;white-space:pre-wrap;">{po.remark}</div>
+  </div>""" if po.remark else ''}
+
   <!-- ── TERMS & CONDITIONS ────────────────────────────────────── -->
   <div class="terms">
     <h4>Terms &amp; Conditions:</h4>

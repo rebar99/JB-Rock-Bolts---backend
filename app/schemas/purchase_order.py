@@ -70,6 +70,7 @@ class PurchaseOrderBase(BaseModel):
     payment_terms: Optional[str] = None
     validity_date: Optional[datetime] = None
     file_url: Optional[str] = None
+    remark: Optional[str] = None
 
 class PurchaseOrderCreate(PurchaseOrderBase):
     created_by: Optional[str] = None
@@ -86,8 +87,14 @@ class PurchaseOrderUpdate(BaseModel):
     payment_terms: Optional[str] = None
     validity_date: Optional[datetime] = None
     file_url: Optional[str] = None
+    remark: Optional[str] = None
     last_updated_by: Optional[str] = None
     line_items: Optional[List[POLineItemCreate]] = None
+
+
+class PurchaseOrderShortClose(BaseModel):
+    remark: Optional[str] = None
+    user: Optional[str] = None
 
 class PurchaseOrderOut(PurchaseOrderBase):
     id: int
@@ -98,6 +105,10 @@ class PurchaseOrderOut(PurchaseOrderBase):
     last_updated_at: Optional[UTCDatetime] = None
     last_updated_by: Optional[str] = None
     line_items: List[POLineItemOut] = []
+    short_closed: bool = False
+    short_closed_at: Optional[datetime] = None
+    short_closed_by: Optional[str] = None
+    short_closed_remark: Optional[str] = None
 
     @computed_field
     @property
@@ -146,6 +157,8 @@ class PurchaseOrderOut(PurchaseOrderBase):
     @computed_field
     @property
     def delivery_status(self) -> str:
+        if self.short_closed:
+            return "Short Closed"
         if self.delivered_quantity <= 0:
             return "Not Delivered"
         elif self.delivered_quantity >= self.total_quantity:
