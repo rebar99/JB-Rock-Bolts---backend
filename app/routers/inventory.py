@@ -76,7 +76,11 @@ def update_product(product_id: int, payload: ProductUpdate, db: Session = Depend
     if changed_fields:
         details_str += f" Changed fields: {', '.join(changed_fields)}"
         
-    log_activity(db, "Product Updated", "Product", details_str, "System/Admin", product.id)
+    log_activity(
+        db, "Product Updated", "Product", details_str, "System/Admin", product.id,
+        entity_name=product.name,
+        changed_fields=", ".join(changed_fields) if changed_fields else None,
+    )
     return _to_out(product)
 
 
@@ -88,4 +92,4 @@ def delete_product(product_id: int, db: Session = Depends(get_db)):
     name = product.name
     db.delete(product)
     db.commit()
-    log_activity(db, "Product Deleted", "Product", f"Deleted product {name}.", "System/Admin", product_id)
+    log_activity(db, "Product Deleted", "Product", f"Deleted product {name}.", "System/Admin", product_id, entity_name=name)

@@ -43,6 +43,9 @@ def log_activity(
     details: str,
     user: str,
     entity_id: int = None,
+    entity_name: str = None,
+    changed_fields: str = None,
+    status: str = "Success",
 ):
     from app.models.models import SystemLog
     from app import notifications
@@ -51,8 +54,11 @@ def log_activity(
             action=action,
             entity_type=entity_type,
             entity_id=entity_id,
+            entity_name=entity_name,
             details=details,
-            user=user
+            changed_fields=changed_fields,
+            status=status,
+            user=user,
         )
         db.add(log_entry)
         db.commit()

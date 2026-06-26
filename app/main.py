@@ -172,6 +172,40 @@ async def lifespan(app: FastAPI):
                     conn.execute(text(f"ALTER TABLE sales MODIFY COLUMN {col} FLOAT NULL"))
                 except Exception:
                     pass
+            # Safely migrate system_logs new columns
+            for col, dtype in [
+                ("entity_name", "VARCHAR(300) NULL"),
+                ("changed_fields", "TEXT NULL"),
+                ("status", "VARCHAR(50) NULL DEFAULT 'Success'"),
+            ]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM system_logs LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE system_logs ADD COLUMN {col} {dtype}"))
+                    except Exception:
+                        pass
+
+            # Safely create user_sessions table
+            try:
+                conn.execute(text("SELECT id FROM user_sessions LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE user_sessions (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            user_id INT NOT NULL,
+                            user_name VARCHAR(100) NOT NULL,
+                            user_email VARCHAR(150) NOT NULL,
+                            login_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            logout_at DATETIME NULL,
+                            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                            FOREIGN KEY (user_id) REFERENCES users(id)
+                        )
+                    """))
+                except Exception:
+                    pass
+
     except Exception as e:
         logger.error(f"Error applying schema updates: {e}")
 

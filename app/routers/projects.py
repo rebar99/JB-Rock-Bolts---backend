@@ -34,7 +34,7 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
     db.add(project)
     db.commit()
     db.refresh(project)
-    log_activity(db, "Project Created", "Project", f"Created project {project.name} for client {client.name}.", payload.created_by or "System", project.id)
+    log_activity(db, "Project Created", "Project", f"Created project {project.name} for client {client.name}.", payload.created_by or "System", project.id, entity_name=project.name)
     return project
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -45,4 +45,4 @@ def delete_project(project_id: int, deleted_by: Optional[str] = None, db: Sessio
     name = project.name
     db.delete(project)
     db.commit()
-    log_activity(db, "Project Deleted", "Project", f"Deleted project {name}.", deleted_by or "System", project_id)
+    log_activity(db, "Project Deleted", "Project", f"Deleted project {name}.", deleted_by or "System", project_id, entity_name=name)

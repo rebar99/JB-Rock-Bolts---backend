@@ -57,7 +57,7 @@ def create_client(payload: ClientCreate, db: Session = Depends(get_db)):
     db.add(client)
     db.commit()
     db.refresh(client)
-    log_activity(db, "Client Created", "Client", f"Created client {client.name}.", payload.created_by or "System", client.id)
+    log_activity(db, "Client Created", "Client", f"Created client {client.name}.", payload.created_by or "System", client.id, entity_name=client.name)
     return ClientOut(
         id=client.id,
         name=client.name,
@@ -84,4 +84,4 @@ def delete_client(client_id: int, deleted_by: Optional[str] = None, db: Session 
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete client because it has linked Purchase Orders or Sales. Please delete them first."
         )
-    log_activity(db, "Client Deleted", "Client", f"Deleted client {client_name}.", deleted_by or "System", client_id)
+    log_activity(db, "Client Deleted", "Client", f"Deleted client {client_name}.", deleted_by or "System", client_id, entity_name=client_name)

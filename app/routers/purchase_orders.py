@@ -287,7 +287,7 @@ def create_purchase_order(payload: PurchaseOrderCreate, db: Session = Depends(ge
             detail=f"Purchase order with PO# '{payload.po_number}' already exists.",
         )
 
-    log_activity(db, "PO Created", "PurchaseOrder", f"Created PO {po.po_number} for {po.client_name}.", payload.created_by or "System", po.id)
+    log_activity(db, "PO Created", "PurchaseOrder", f"Created PO {po.po_number} for {po.client_name}.", payload.created_by or "System", po.id, entity_name=po.po_number)
     return po
 
 
@@ -376,7 +376,12 @@ def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, db: Session 
     if changed_fields:
         details_str += f" Changed fields: {', '.join(changed_fields)}"
 
-    log_activity(db, "PO Updated", "PurchaseOrder", details_str, po.last_updated_by or "System", po.id)
+    log_activity(
+        db, "PO Updated", "PurchaseOrder", details_str,
+        po.last_updated_by or "System", po.id,
+        entity_name=po.po_number,
+        changed_fields=", ".join(changed_fields) if changed_fields else None,
+    )
     return po
 
 
@@ -410,7 +415,7 @@ def short_close_purchase_order(po_id: int, payload: PurchaseOrderShortClose, db:
     if payload.remark:
         details += f" Reason: {payload.remark}"
 
-    log_activity(db, "PO Short Closed", "PurchaseOrder", details, payload.user or "System", po.id)
+    log_activity(db, "PO Short Closed", "PurchaseOrder", details, payload.user or "System", po.id, entity_name=po.po_number)
     return po
 
 
@@ -436,4 +441,4 @@ def delete_purchase_order(po_id: int, deleted_by: Optional[str] = None, db: Sess
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete this Purchase Order due to database constraints (linked records exist)."
         )
-    log_activity(db, "PO Deleted", "PurchaseOrder", f"Deleted PO {po_number}.", deleted_by or "System", po_id)
+    log_activity(db, "PO Deleted", "PurchaseOrder", f"Deleted PO {po_number}.", deleted_by or "System", po_id, entity_name=po_number)
