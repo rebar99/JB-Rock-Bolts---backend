@@ -416,6 +416,23 @@ class SystemLog(Base):
     action = Column(String(200), nullable=False)
     entity_type = Column(String(100), nullable=False)
     entity_id = Column(Integer, nullable=True)
+    entity_name = Column(String(300), nullable=True)
     details = Column(Text, nullable=True)
+    changed_fields = Column(Text, nullable=True)
+    status = Column(String(50), nullable=True, default="Success")
     user = Column(String(100), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user_name = Column(String(100), nullable=False)
+    user_email = Column(String(150), nullable=False)
+    login_at = Column(DateTime, server_default=func.now())
+    logout_at = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+
+    user_rel = relationship("User", foreign_keys=[user_id])

@@ -394,7 +394,7 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(sale)
 
-    log_activity(db, "Sale Created", "Sale", f"Created sale invoice {sale.invoice_number} for {po.client_name}.", payload.created_by, sale.id)
+    log_activity(db, "Sale Created", "Sale", f"Created sale invoice {sale.invoice_number} for {po.client_name}.", payload.created_by, sale.id, entity_name=sale.invoice_number)
     return sale
 
 
@@ -487,7 +487,12 @@ def update_sale(sale_id: int, payload: SaleUpdate, db: Session = Depends(get_db)
     if changed_fields:
         details_str += f" Changed fields: {', '.join(changed_fields)}"
 
-    log_activity(db, "Sale Updated", "Sale", details_str, updated_by or "System", sale.id)
+    log_activity(
+        db, "Sale Updated", "Sale", details_str,
+        updated_by or "System", sale.id,
+        entity_name=sale.invoice_number,
+        changed_fields=", ".join(changed_fields) if changed_fields else None,
+    )
     return sale
 
 
@@ -523,7 +528,7 @@ def mark_delivered(
     db.add(activity)
     db.commit()
     db.refresh(sale)
-    log_activity(db, "Sale Marked Delivered", "Sale", f"Sale invoice {sale.invoice_number} marked as Delivered.", payload.updated_by, sale.id)
+    log_activity(db, "Sale Marked Delivered", "Sale", f"Sale invoice {sale.invoice_number} marked as Delivered.", payload.updated_by, sale.id, entity_name=sale.invoice_number)
     return sale
 
 
@@ -545,7 +550,7 @@ def delete_sale(sale_id: int, deleted_by: Optional[str] = None, db: Session = De
 
     db.delete(sale)
     db.commit()
-    log_activity(db, "Sale Deleted", "Sale", f"Deleted sale invoice for {sale.client_name}.", deleted_by or "System", sale_id)
+    log_activity(db, "Sale Deleted", "Sale", f"Deleted sale invoice {sale.invoice_number} for {sale.client_name}.", deleted_by or "System", sale_id, entity_name=sale.invoice_number)
 
 
 @router.post("/{sale_id}/activities", response_model=SaleActivityOut, status_code=status.HTTP_201_CREATED)
