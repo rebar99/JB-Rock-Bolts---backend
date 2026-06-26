@@ -415,7 +415,7 @@ def short_close_purchase_order(po_id: int, payload: PurchaseOrderShortClose, db:
 
 
 @router.delete("/{po_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_purchase_order(po_id: int, db: Session = Depends(get_db)):
+def delete_purchase_order(po_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
     po = db.get(PurchaseOrder, po_id)
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found.")
@@ -426,6 +426,7 @@ def delete_purchase_order(po_id: int, db: Session = Depends(get_db)):
             detail="Cannot delete this Purchase Order because it has linked Sales/Invoices. Please delete the sales records first."
         )
 
+    po_number = po.po_number
     try:
         db.delete(po)
         db.commit()
@@ -435,3 +436,4 @@ def delete_purchase_order(po_id: int, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete this Purchase Order due to database constraints (linked records exist)."
         )
+    log_activity(db, "PO Deleted", "PurchaseOrder", f"Deleted PO {po_number}.", deleted_by or "System", po_id)

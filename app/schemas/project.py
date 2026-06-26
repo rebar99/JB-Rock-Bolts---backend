@@ -1,9 +1,11 @@
 from pydantic import BaseModel
 from datetime import datetime
+from typing import Optional
 
 class ProjectCreate(BaseModel):
     name: str
     client_name: str
+    created_by: Optional[str] = None
 
 class ProjectOut(BaseModel):
     id: int
