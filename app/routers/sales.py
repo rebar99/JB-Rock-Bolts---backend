@@ -528,7 +528,7 @@ def mark_delivered(
 
 
 @router.delete("/{sale_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_sale(sale_id: int, db: Session = Depends(get_db)):
+def delete_sale(sale_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
     sale = db.get(Sale, sale_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Sale not found.")
@@ -545,7 +545,7 @@ def delete_sale(sale_id: int, db: Session = Depends(get_db)):
 
     db.delete(sale)
     db.commit()
-    log_activity(db, "Sale Deleted", "Sale", f"Deleted sale invoice for {sale.client_name}.", "System/Admin", sale_id)
+    log_activity(db, "Sale Deleted", "Sale", f"Deleted sale invoice for {sale.client_name}.", deleted_by or "System", sale_id)
 
 
 @router.post("/{sale_id}/activities", response_model=SaleActivityOut, status_code=status.HTTP_201_CREATED)
