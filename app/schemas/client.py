@@ -1,12 +1,14 @@
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional, List
+
 from .project import ProjectOut
 
 
 class ClientCreate(BaseModel):
     name: str
     location: str
+    created_by: Optional[str] = None
 
 
 class ClientOut(BaseModel):

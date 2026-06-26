@@ -57,7 +57,7 @@ def create_client(payload: ClientCreate, db: Session = Depends(get_db)):
     db.add(client)
     db.commit()
     db.refresh(client)
-    log_activity(db, "Client Created", "Client", f"Created client {client.name}.", "System/Admin", client.id)
+    log_activity(db, "Client Created", "Client", f"Created client {client.name}.", payload.created_by or "System", client.id)
     return ClientOut(
         id=client.id,
         name=client.name,
@@ -69,11 +69,12 @@ def create_client(payload: ClientCreate, db: Session = Depends(get_db)):
 
 
 @router.delete("/{client_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_client(client_id: int, db: Session = Depends(get_db)):
+def delete_client(client_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
     client = db.get(Client, client_id)
     if not client:
         raise HTTPException(status_code=404, detail="Client not found.")
-    
+
+    client_name = client.name
     try:
         db.delete(client)
         db.commit()
@@ -83,3 +84,4 @@ def delete_client(client_id: int, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete client because it has linked Purchase Orders or Sales. Please delete them first."
         )
+    log_activity(db, "Client Deleted", "Client", f"Deleted client {client_name}.", deleted_by or "System", client_id)

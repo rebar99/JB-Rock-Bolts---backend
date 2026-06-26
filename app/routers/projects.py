@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from app.database import get_db
 from app.models.models import Project, Client
 from app.schemas.project import ProjectCreate, ProjectOut
@@ -34,15 +34,15 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
     db.add(project)
     db.commit()
     db.refresh(project)
-    log_activity(db, "Project Created", "Project", f"Created project {project.name} for client {client.name}.", "System/Admin", project.id)
+    log_activity(db, "Project Created", "Project", f"Created project {project.name} for client {client.name}.", payload.created_by or "System", project.id)
     return project
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_project(project_id: int, db: Session = Depends(get_db)):
+def delete_project(project_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
     name = project.name
     db.delete(project)
     db.commit()
-    log_activity(db, "Project Deleted", "Project", f"Deleted project {name}.", "System/Admin", project_id)
+    log_activity(db, "Project Deleted", "Project", f"Deleted project {name}.", deleted_by or "System", project_id)
