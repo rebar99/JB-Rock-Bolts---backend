@@ -62,6 +62,7 @@ class PendingPORow(BaseModel):
     pending_subtotal: float
     pending_gst: float
     pending_total: float
+    delivered_payment: float = 0
     status: str
     date: str
     uom: str = "Nos"
@@ -76,4 +77,5 @@ class PendingPOReportOut(BaseModel):
     total_gst: float
     total_value: float
     total_pending_value: float
+    total_delivered_payment: float = 0
     count: int

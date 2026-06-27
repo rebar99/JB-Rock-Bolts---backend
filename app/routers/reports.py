@@ -124,7 +124,7 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
     pending_orders = [o for o in all_pos if o.delivery_status != DeliveryStatus.DELIVERED]
 
     rows = []
-    total_subtotal = total_gst = total_value = total_pending_value = 0
+    total_subtotal = total_gst = total_value = total_pending_value = total_delivered_payment = 0
 
     for o in pending_orders:
         t_sub = float(o.subtotal or 0)
@@ -137,12 +137,25 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
 
         t_qty = float(o.total_qty or 0)
         d_qty = float(o.delivered_qty or 0)
-        p_ratio = max(0, (t_qty - d_qty) / t_qty) if t_qty > 0 else 1.0
 
-        p_sub = t_sub * p_ratio
-        p_gst = t_gst * p_ratio
-        p_total = t_total * p_ratio
+        # Delivered payment = sum of actual invoiced amounts against this PO
+        delivered_sub = sum(float(s.subtotal or 0) for s in o.sales)
+        delivered_gst_amt = sum(float(s.gst_amount or 0) for s in o.sales)
+        delivered_payment = sum(float(s.grand_total or 0) for s in o.sales)
+
+        p_sub = max(0, t_sub - delivered_sub)
+        p_gst = max(0, t_gst - delivered_gst_amt)
+        p_total = max(0, t_total - delivered_payment)
+
+        pending_qty = max(0, t_qty - d_qty)
+        # Fallback: if pending qty exists but pending payment = 0 (PO price missing/wrong),
+        # estimate from the per-unit rate of actual invoices
+        if p_total == 0 and pending_qty > 0 and d_qty > 0 and delivered_payment > 0:
+            invoice_rate = delivered_payment / d_qty
+            p_total = round(invoice_rate * pending_qty, 2)
+
         total_pending_value += p_total
+        total_delivered_payment += delivered_payment
 
         rows.append(PendingPORow(
             id=o.id,
@@ -156,12 +169,13 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
             pending_subtotal=round(p_sub, 2),
             pending_gst=round(p_gst, 2),
             pending_total=round(p_total, 2),
+            delivered_payment=round(delivered_payment, 2),
             status=o.delivery_status,
             date=o.created_at.strftime("%d-%m-%Y") if o.created_at else "—",
             uom=o.uom or "Nos",
             total_qty=round(t_qty, 2),
             delivered_qty=round(d_qty, 2),
-            pending_qty=round(max(0, t_qty - d_qty), 2),
+            pending_qty=round(pending_qty, 2),
         ))
 
     return PendingPOReportOut(
@@ -170,6 +184,7 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
         total_gst=round(total_gst, 2),
         total_value=round(total_value, 2),
         total_pending_value=round(total_pending_value, 2),
+        total_delivered_payment=round(total_delivered_payment, 2),
         count=len(rows)
     )
 
@@ -226,19 +241,19 @@ def export_combined_report(
         ws = wb.create_sheet("Pending POs")
         headers = ["Date", "PO Number", "Client Name", "Project", "Items",
                    "Value (Excl. GST) ₹", "GST Amount ₹", "Total Value ₹",
-                   "Pending Subtotal ₹", "Pending GST ₹", "Pending Total ₹", "Status"]
+                   "Delivered Payment ₹", "Pending Total ₹", "Status"]
         ws.append(headers)
         style_header_row(ws, len(headers))
         data = get_pending_pos_report(db=db)
         for r in data.rows:
             ws.append([r.date, r.po_number, r.client_name, r.project, r.item,
                        r.subtotal, r.gst_amount, r.total_value,
-                       r.pending_subtotal, r.pending_gst, r.pending_total,
+                       r.delivered_payment, r.pending_total,
                        str(r.status.value if hasattr(r.status, "value") else r.status)])
         ws.append([])
         ws.append(["", "", "", "", "Totals:",
                    data.total_subtotal, data.total_gst, data.total_value,
-                   "", "", data.total_pending_value])
+                   data.total_delivered_payment, data.total_pending_value])
 
     if not wb.sheetnames:
         raise HTTPException(status_code=400, detail="No valid sheet types in request")
@@ -371,7 +386,7 @@ def export_report(
         headers = [
             "Date", "PO Number", "Client Name", "Project", "Items",
             "Value (Excl. GST) ₹", "GST Amount ₹", "Total Value ₹",
-            "Pending Subtotal ₹", "Pending GST ₹", "Pending Total ₹", "Status",
+            "Delivered Payment ₹", "Pending Total ₹", "Status",
         ]
         ws.append(headers)
         style_header_row(ws, len(headers))
@@ -381,13 +396,13 @@ def export_report(
             ws.append([
                 r.date, r.po_number, r.client_name, r.project, r.item,
                 r.subtotal, r.gst_amount, r.total_value,
-                r.pending_subtotal, r.pending_gst, r.pending_total,
+                r.delivered_payment, r.pending_total,
                 str(r.status.value if hasattr(r.status, "value") else r.status),
             ])
 
         ws.append([])
         ws.append(["", "", "", "", "Totals:", data.total_subtotal, data.total_gst, data.total_value,
-                   "", "", data.total_pending_value])
+                   data.total_delivered_payment, data.total_pending_value])
 
         filename = "pending-pos-report.xlsx"
 
