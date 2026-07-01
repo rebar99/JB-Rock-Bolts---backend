@@ -60,9 +60,9 @@ def export_purchase_orders(db: Session = Depends(get_db)):
 
     headers = [
         "PO Number", "Client Name", "Project",
-        "Item Name", "Quantity", "UOM", "Unit Price",
+        "Item Name", "Quantity", "Delivered Qty", "Pending Qty", "UOM", "Unit Price",
         "GST", "Freight", "Subtotal", "Row Total",
-        "Payment Terms", "PO Validity Date", "PO Document URL", "Created By",
+        "Payment Terms", "PO Validity Date", "PO Document URL", "Created By", "Remark",
     ]
     ws.append(headers)
     style_header_row(ws, len(headers))
@@ -72,6 +72,8 @@ def export_purchase_orders(db: Session = Depends(get_db)):
         for li in items:
             if li:
                 qty = float(li.quantity or 0)
+                delivered = float(li.delivered_quantity or 0)
+                pending = round(max(0, qty - delivered), 10)
                 price = float(li.unit_price or 0)
                 sub = qty * price
                 gst_str = str(li.gst or "0")
@@ -81,15 +83,18 @@ def export_purchase_orders(db: Session = Depends(get_db)):
                 row_total = sub + gst_amt + freight
                 ws.append([
                     o.po_number, o.client_name, o.project or "",
-                    li.item, qty, li.uom or "Nos", price,
+                    li.item, qty, delivered, pending, li.uom or "Nos", price,
                     gst_str, freight, round(sub, 2), round(row_total, 2),
                     o.payment_terms or "",
                     o.validity_date.strftime("%Y-%m-%d") if o.validity_date else "",
                     o.file_url or "",
                     o.created_by or "",
+                    o.remark or "",
                 ])
             else:
                 qty = float(o.total_quantity or 0)
+                delivered = float(o.delivered_quantity or 0)
+                pending = round(max(0, qty - delivered), 10)
                 price = float(o.unit_price or 0)
                 sub = qty * price
                 gst_str = str(o.gst or "0")
@@ -99,15 +104,53 @@ def export_purchase_orders(db: Session = Depends(get_db)):
                 row_total = sub + gst_amt + freight
                 ws.append([
                     o.po_number, o.client_name, o.project or "",
-                    o.item or "", qty, o.uom or "Nos", price,
+                    o.item or "", qty, delivered, pending, o.uom or "Nos", price,
                     gst_str, freight, round(sub, 2), round(row_total, 2),
                     o.payment_terms or "",
                     o.validity_date.strftime("%Y-%m-%d") if o.validity_date else "",
                     o.file_url or "",
                     o.created_by or "",
+                    o.remark or "",
                 ])
 
     return make_excel_response(wb, "purchase-orders-export.xlsx")
+
+
+# ── Recalculate delivered_quantity for all line items ─────────────────────────
+
+@router.post("/recalculate-delivered")
+def recalculate_delivered_quantities(db: Session = Depends(get_db)):
+    """Rebuild POLineItem.delivered_quantity from actual SaleItem records.
+    Matches by line_item_id first, then falls back to item name matching."""
+    from app.models.models import Sale, SaleItem
+
+    orders = db.query(PurchaseOrder).all()
+    fixed = 0
+    for po in orders:
+        if not po.line_items:
+            continue
+        for li in po.line_items:
+            # Sum all SaleItems linked directly by ID
+            by_id = db.query(SaleItem).filter(SaleItem.line_item_id == li.id).all()
+            total = sum(float(si.quantity or 0) for si in by_id)
+
+            # Also count SaleItems on this PO linked by name (where line_item_id is null)
+            po_sale_ids = [s.id for s in po.sales]
+            if po_sale_ids:
+                by_name = db.query(SaleItem).filter(
+                    SaleItem.sale_id.in_(po_sale_ids),
+                    SaleItem.line_item_id.is_(None),
+                    SaleItem.item.ilike(li.item),
+                ).all()
+                total += sum(float(si.quantity or 0) for si in by_name)
+
+            new_val = round(max(0, total), 10)
+            if abs(new_val - float(li.delivered_quantity or 0)) > 0.0001:
+                li.delivered_quantity = new_val
+                fixed += 1
+
+    db.commit()
+    return {"fixed_line_items": fixed}
 
 
 # ── Excel import ──────────────────────────────────────────────────────────────
@@ -202,6 +245,9 @@ async def import_purchase_orders(
                 freight_val = _field(base, ["freight", "Freight", "shipping_charge"])
                 if freight_val not in (None, ""):
                     existing.freight = _float(freight_val)
+                remark_val = _field(base, ["remark", "Remark", "remarks", "Remarks", "note", "Note"])
+                if remark_val not in (None, ""):
+                    existing.remark = str(remark_val)
                 existing.last_updated_at = datetime.utcnow()
                 existing.last_updated_by = created_by or "Import"
                 try:
@@ -222,6 +268,7 @@ async def import_purchase_orders(
             "freight": _float(_field(base, ["freight", "Freight", "shipping_charge", "freight_amount"])),
             "payment_terms": str(_field(base, ["payment_terms", "Payment Terms", "terms"]) or ""),
             "validity_date": parse_optional_datetime(_field(base, ["validity_date", "PO Validity Date", "validity", "po_date"])),
+            "remark": str(_field(base, ["remark", "Remark", "remarks", "Remarks", "note", "Note"]) or "") or None,
             "created_by": created_by or "Import",
             "line_items": line_items_raw,
         }
