@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import Optional
 from datetime import datetime
 from app.database import get_db
@@ -39,7 +39,10 @@ def get_report(
     if client and client.lower() != "all":
         q = q.filter(Sale.client_name.ilike(f"%{client}%"))
 
-    sales = q.order_by(Sale.created_at.desc()).limit(limit).all()
+    sales = q.options(
+        joinedload(Sale.items),
+        joinedload(Sale.purchase_order),
+    ).order_by(Sale.created_at.desc()).limit(limit).all()
 
     rows = []
     total_revenue = 0
@@ -47,6 +50,10 @@ def get_report(
         row_price = float(s.grand_total or 0)
         total_revenue += row_price
 
+        po = s.purchase_order
+        dispatched_qty = round(sum(item.quantity for item in s.items), 10)
+        total_qty = round(float(po.total_qty if po else 0), 10)
+        pending_qty = round(float(po.pending_quantity if po else 0), 10)
         rows.append(ReportRow(
             id=s.id,
             date=s.created_at.strftime("%d-%m-%Y") if s.created_at else "",
@@ -62,6 +69,10 @@ def get_report(
             payment_status=s.payment_status.value if hasattr(s.payment_status, 'value') else str(s.payment_status),
             delivery_status="Dispatched",
             payment_note=s.payment_note,
+            dispatched_qty=dispatched_qty,
+            total_qty=total_qty,
+            pending_qty=pending_qty,
+            uom=po.uom if po else "Nos",
         ))
 
     record_count = len(sales)
@@ -227,13 +238,16 @@ def export_combined_report(
     if "sales" in requested:
         ws = wb.create_sheet("Sales Report")
         headers = ["Date", "Client Name", "Project / Location", "Items",
-                   "Invoice No", "PO No", "E-Way Bill No", "Grand Total (₹)", "Payment Status"]
+                   "Invoice No", "PO No", "E-Way Bill No",
+                   "Total Qty", "Dispatched Qty", "Pending Qty", "UOM",
+                   "Grand Total (₹)", "Payment Status"]
         ws.append(headers)
         style_header_row(ws, len(headers))
         data = get_report(from_date=from_date, to_date=to_date, product=product, client=client, db=db)
         for r in data.rows:
             ws.append([r.date, r.client_name, r.location, r.product,
                        r.invoice_number or "—", r.po_number or "—", r.e_way_bill_no or "—",
+                       r.total_qty, r.dispatched_qty, r.pending_qty, r.uom,
                        r.price, r.payment_status])
         ws.append([])
         ws.append(["", "", "", "", "", "", "Total Revenue:", data.total_revenue])
@@ -364,6 +378,7 @@ def export_report(
         headers = [
             "Date", "Client Name", "Project / Location", "Items",
             "Invoice No", "PO No", "E-Way Bill No",
+            "Total Qty", "Dispatched Qty", "Pending Qty", "UOM",
             "Grand Total (₹)", "Payment Status",
         ]
         ws.append(headers)
@@ -374,6 +389,7 @@ def export_report(
             ws.append([
                 r.date, r.client_name, r.location, r.product,
                 r.invoice_number or "—", r.po_number or "—", r.e_way_bill_no or "—",
+                r.total_qty, r.dispatched_qty, r.pending_qty, r.uom,
                 r.price, r.payment_status,
             ])
 

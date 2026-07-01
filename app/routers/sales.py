@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import os
@@ -77,7 +77,7 @@ def export_sales(db: Session = Depends(get_db)):
     """Export all Sales / Invoices to an Excel (.xlsx) file."""
     from openpyxl import Workbook
 
-    sales = db.query(Sale).order_by(Sale.created_at.desc()).all()
+    sales = db.query(Sale).options(joinedload(Sale.items)).order_by(Sale.created_at.desc()).all()
 
     wb = Workbook()
     ws = wb.active
@@ -87,7 +87,7 @@ def export_sales(db: Session = Depends(get_db)):
         "Invoice Number", "PO Number", "Client Name", "Project",
         "Item Name", "UOM", "Quantity", "Unit Price", "GST Rate (%)", "HSN/SAC",
         "Subtotal", "GST Amount", "Freight", "Grand Total",
-        "Payment Status", "Payment Terms",
+        "Payment Status", "Payment Note", "Payment Terms",
         "Dispatch From", "Ship To", "Bill To", "Dispatched Through",
         "E-Way Bill No", "Buyer's Order No",
         "Invoice Document URL", "E-Way Bill Document URL",
@@ -115,6 +115,7 @@ def export_sales(db: Session = Depends(get_db)):
                 float(s.freight or 0),
                 float(s.grand_total or 0),
                 s.payment_status.value if hasattr(s.payment_status, "value") else str(s.payment_status or ""),
+                s.payment_note or "",
                 s.payment_terms or "",
                 s.dispatch_from or "",
                 s.ship_to or "",
@@ -382,6 +383,15 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db)):
             li = db.get(POLineItem, item_data.line_item_id)
             if li:
                 li.delivered_quantity += item_data.quantity
+                sale_item.line_item_id = li.id
+        else:
+            matching_li = next(
+                (l for l in po.line_items if l.item.lower().strip() == item_data.item.lower().strip()),
+                None
+            )
+            if matching_li:
+                matching_li.delivered_quantity += item_data.quantity
+                sale_item.line_item_id = matching_li.id
 
     activity = SaleActivity(
         sale_id=sale.id,
@@ -456,6 +466,15 @@ def update_sale(sale_id: int, payload: SaleUpdate, db: Session = Depends(get_db)
                 li = db.get(POLineItem, li_id)
                 if li:
                     li.delivered_quantity += item_data.get("quantity", 0)
+                    new_item.line_item_id = li.id
+            else:
+                matching_li = next(
+                    (l for l in po.line_items if l.item.lower().strip() == (item_data.get("item") or "").lower().strip()),
+                    None
+                ) if po else None
+                if matching_li:
+                    matching_li.delivered_quantity += item_data.get("quantity", 0)
+                    new_item.line_item_id = matching_li.id
 
     changed_fields = []
     for field, value in updates.items():

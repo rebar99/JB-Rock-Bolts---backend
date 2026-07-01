@@ -25,6 +25,10 @@ class ReportRow(BaseModel):
     payment_status: str
     delivery_status: str
     payment_note: Optional[str] = None
+    dispatched_qty: float = 0
+    total_qty: float = 0
+    pending_qty: float = 0
+    uom: str = "Nos"
 
 
 class ReportOut(BaseModel):
