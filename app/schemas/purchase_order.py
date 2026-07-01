@@ -21,7 +21,7 @@ class POLineItemOut(POLineItemBase):
     @computed_field
     @property
     def pending_quantity(self) -> float:
-        return max(0, self.quantity - self.delivered_quantity)
+        return round(max(0, self.quantity - self.delivered_quantity), 10)
 
     @computed_field
     @property
@@ -139,7 +139,7 @@ class PurchaseOrderOut(PurchaseOrderBase):
     @computed_field
     @property
     def pending_quantity(self) -> float:
-        return max(0, self.total_quantity - self.delivered_quantity)
+        return round(max(0, self.total_quantity - self.delivered_quantity), 10)
 
     @computed_field
     @property

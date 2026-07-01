@@ -24,6 +24,7 @@ class ReportRow(BaseModel):
     gst_amount: float = 0
     payment_status: str
     delivery_status: str
+    payment_note: Optional[str] = None
 
 
 class ReportOut(BaseModel):
@@ -44,6 +45,7 @@ class FulfillmentReportRow(BaseModel):
     delivered: float
     pending: float
     uom: str
+    remark: Optional[str] = None
 
 
 class FulfillmentReportOut(BaseModel):
@@ -69,6 +71,7 @@ class PendingPORow(BaseModel):
     total_qty: float = 0
     delivered_qty: float = 0
     pending_qty: float = 0
+    remark: Optional[str] = None
 
 
 class PendingPOReportOut(BaseModel):
