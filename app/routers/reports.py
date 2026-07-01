@@ -61,6 +61,7 @@ def get_report(
             gst_amount=round(float(s.gst_amount or 0), 2),
             payment_status=s.payment_status.value if hasattr(s.payment_status, 'value') else str(s.payment_status),
             delivery_status="Dispatched",
+            payment_note=s.payment_note,
         ))
 
     record_count = len(sales)
@@ -105,8 +106,9 @@ def get_fulfillment_report(
             item=o.items_display,
             total_required=o.total_quantity,
             delivered=o.delivered_quantity,
-            pending=max(0, o.total_quantity - o.delivered_quantity),
+            pending=round(max(0, o.total_quantity - o.delivered_quantity), 10),
             uom=o.uom or "Nos",
+            remark=o.remark,
         )
         for o in orders
     ]
@@ -176,6 +178,7 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
             total_qty=round(t_qty, 2),
             delivered_qty=round(d_qty, 2),
             pending_qty=round(pending_qty, 2),
+            remark=o.remark,
         ))
 
     return PendingPOReportOut(

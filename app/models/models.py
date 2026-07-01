@@ -129,7 +129,7 @@ class PurchaseOrder(Base):
 
     @property
     def pending_quantity(self) -> float:
-        return max(0, self.total_qty - self.delivered_qty)
+        return round(max(0, self.total_qty - self.delivered_qty), 10)
 
     @property
     def delivery_status(self) -> str:
