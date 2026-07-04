@@ -16,6 +16,7 @@ def normalize_client_name(name: str) -> str:
     # Casing, prefixes/suffixes, dots, commas, spaces, and generic terms
     n = name.upper()
     n = n.replace("M/S.", "").replace("M/S", "").replace("LIMITED", "").replace("LTD.", "").replace("LTD", "")
+    n = n.replace("PRIVATE", "").replace("PVT.", "").replace("PVT", "")
     n = n.replace("PROJECTS", "").replace("PRODUCT", "")
     n = n.replace(".", "").replace(",", "").replace(" ", "").strip()
     return n
@@ -23,11 +24,8 @@ def normalize_client_name(name: str) -> str:
 
 @router.get("/stats", response_model=DashboardStats)
 def get_stats(db: Session = Depends(get_db)):
-    # Total revenue calculated from items + freight for maximum accuracy
-    from app.models.models import SaleItem
-    items_total = db.query(func.sum(SaleItem.subtotal + SaleItem.gst_amount)).scalar() or 0
-    freight_total = db.query(func.sum(Sale.freight)).scalar() or 0
-    total_revenue = items_total + freight_total
+    # Total revenue: same source as the Reports page (Sale.grand_total) so both agree
+    total_revenue = db.query(func.sum(Sale.grand_total)).scalar() or 0
 
     # Total number of dispatches
     total_orders = db.query(func.count(Sale.id)).scalar() or 0
