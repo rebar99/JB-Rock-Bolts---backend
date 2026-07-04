@@ -4,7 +4,7 @@ from typing import List
 
 class Settings(BaseSettings):
     APP_NAME: str = "JB Rock Bolts API"
-    APP_VERSION: str = "1.0.1"
+    APP_VERSION: str = "1.0.0"
     APP_ENV: str = "development"
     DEBUG: bool = True
     PORT: int = 8000
