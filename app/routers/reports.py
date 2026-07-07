@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 from typing import Optional
 from datetime import datetime
@@ -43,7 +44,7 @@ def get_report(
         joinedload(Sale.items),
         joinedload(Sale.purchase_order),
     ).order_by(Sale.created_at.desc()).limit(limit).all()
-
+    total_revenue_db = db.query(func.sum(Sale.grand_total)).scalar() or 0
     rows = []
     total_revenue = 0
     for s in sales:
@@ -80,7 +81,7 @@ def get_report(
 
     return ReportOut(
         rows=rows,
-        total_revenue=round(total_revenue, 2),
+        total_revenue=round(total_revenue_db, 2),
         record_count=record_count,
         avg_order_value=round(avg_order_value, 2),
     )
