@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, String, Float, Text, DateTime, Boolean,
+    Column, Integer, String, Float, Numeric, Text, DateTime, Boolean,
     ForeignKey, Enum, func,
 )
 from sqlalchemy.orm import relationship
@@ -298,10 +298,10 @@ class Sale(Base):
     project = Column(String(300), nullable=True)
     
     # Financials (Aggregate)
-    subtotal = Column(Float, nullable=False, default=0)
-    gst_amount = Column(Float, nullable=False, default=0)
-    freight = Column(Float, nullable=False, default=0)
-    grand_total = Column(Float, nullable=False, default=0)
+    subtotal = Column(Numeric(12, 2), nullable=False, default=0)
+    gst_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    freight = Column(Numeric(12, 2), nullable=False, default=0)
+    grand_total = Column(Numeric(12, 2), nullable=False, default=0)
     
     payment_status = Column(
         Enum(PaymentStatus), default=PaymentStatus.PENDING, nullable=False
@@ -359,13 +359,13 @@ class SaleItem(Base):
     item = Column(String(300), nullable=False)
     uom = Column(String(50), nullable=False, default="Nos")
     quantity = Column(Float, nullable=False, default=0)
-    unit_price = Column(Float, nullable=False, default=0)
+    unit_price = Column(Numeric(12, 2), nullable=False, default=0)
     gst_rate = Column(Float, nullable=False, default=0)
-    
+
     # Pre-calculated totals for this item
-    subtotal = Column(Float, nullable=False, default=0)
-    gst_amount = Column(Float, nullable=False, default=0)
-    total_amount = Column(Float, nullable=False, default=0)
+    subtotal = Column(Numeric(12, 2), nullable=False, default=0)
+    gst_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    total_amount = Column(Numeric(12, 2), nullable=False, default=0)
 
     sale = relationship("Sale", back_populates="items")
 

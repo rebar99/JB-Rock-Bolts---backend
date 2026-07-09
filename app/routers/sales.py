@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile,
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+from decimal import Decimal
 import os
 import uuid
 from pydantic import BaseModel
@@ -479,7 +480,8 @@ def update_sale(sale_id: int, payload: SaleUpdate, db: Session = Depends(get_db)
     changed_fields = []
     for field, value in updates.items():
         old_val = getattr(sale, field, None)
-        if old_val != value:
+        compare_val = float(old_val) if isinstance(old_val, Decimal) else old_val
+        if compare_val != value:
             changed_fields.append(field)
             setattr(sale, field, value)
 
