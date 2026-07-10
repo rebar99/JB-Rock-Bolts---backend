@@ -5,10 +5,27 @@ from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
 from app.database import get_db
 from app.models.models import Client, PurchaseOrder, Record
-from app.schemas.client import ClientCreate, ClientOut
-from app.utils.helpers import log_activity
+from app.schemas.client import ClientCreate, ClientOut, ClientStats
+from app.utils.helpers import log_activity, normalize_client_name
 
 router = APIRouter(prefix="/api/clients", tags=["Clients"])
+
+
+@router.get("/stats", response_model=ClientStats)
+def get_client_stats(db: Session = Depends(get_db)):
+    """Total Clients — recalculated from scratch on every request. Client
+    names are normalized (case, spacing, punctuation, legal-entity suffixes
+    like Ltd/Pvt/Limited) before counting, using the exact same normalization
+    as the Dashboard, so 'M/s. Afcons', 'AFCONS', and 'afcons' are counted as
+    a single client here and everywhere else in the app.
+    """
+    all_names = db.query(Client.name).all()
+    normalized_names = set()
+    for row in all_names:
+        n = normalize_client_name(row.name)
+        if n:
+            normalized_names.add(n)
+    return ClientStats(total_clients=len(normalized_names))
 
 
 @router.get("", response_model=List[ClientOut])

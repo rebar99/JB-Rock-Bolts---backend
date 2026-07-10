@@ -21,3 +21,7 @@ class ClientOut(BaseModel):
     projects: Optional[List[ProjectOut]] = []
 
     model_config = {"from_attributes": True}
+
+
+class ClientStats(BaseModel):
+    total_clients: int

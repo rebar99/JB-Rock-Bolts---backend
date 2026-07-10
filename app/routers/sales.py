@@ -7,7 +7,10 @@ import os
 import uuid
 from pydantic import BaseModel
 from app.database import get_db
-from app.utils.helpers import generate_invoice_number, compute_sale_financials, log_activity, recalc_po_delivered_quantities
+from app.utils.helpers import (
+    generate_invoice_number, log_activity, recalc_po_delivered_quantities,
+    compute_line_taxable_and_gst, compute_sale_taxable_and_gst, compute_sale_grand_total,
+)
 from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
     parse_optional_datetime, make_excel_response, style_header_row,
@@ -98,8 +101,14 @@ def export_sales(db: Session = Depends(get_db)):
     style_header_row(ws, len(headers))
 
     for s in sales:
+        # Same shared helpers as the Sales Report/Dashboard — never the stored
+        # Sale.subtotal/gst_amount/grand_total or SaleItem.subtotal/gst_amount
+        # columns, which are only a snapshot from when the sale was created.
+        s_taxable, s_gst = compute_sale_taxable_and_gst(s.items)
+        s_grand_total = compute_sale_grand_total(s_taxable, s_gst, float(s.freight or 0))
         items = s.items if s.items else [None]
         for si in items:
+            si_taxable, si_gst = compute_line_taxable_and_gst(si.quantity, si.unit_price, si.gst_rate) if si else (0.0, 0.0)
             ws.append([
                 s.invoice_number or "",
                 s.po_number or "",
@@ -111,10 +120,10 @@ def export_sales(db: Session = Depends(get_db)):
                 float(si.unit_price or 0) if si else 0,
                 float(si.gst_rate or 0) if si else 0,
                 s.hsn_code or "",
-                float(si.subtotal or 0) if si else float(s.subtotal or 0),
-                float(si.gst_amount or 0) if si else float(s.gst_amount or 0),
+                si_taxable if si else s_taxable,
+                si_gst if si else s_gst,
                 float(s.freight or 0),
-                float(s.grand_total or 0),
+                s_grand_total,
                 s.payment_status.value if hasattr(s.payment_status, "value") else str(s.payment_status or ""),
                 s.payment_note or "",
                 s.payment_terms or "",

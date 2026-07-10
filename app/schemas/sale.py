@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Optional, List
 from app.models.models import PaymentStatus
 from app.schemas.base import UTCDatetime, OptUTCDatetime
+from app.utils.helpers import compute_line_taxable_and_gst, compute_sale_taxable_and_gst, compute_sale_grand_total
 
 
 class SaleActivityCreate(BaseModel):
@@ -43,11 +44,26 @@ class SaleItemOut(BaseModel):
     quantity: float
     unit_price: float
     gst_rate: float
-    subtotal: float
-    gst_amount: float
-    total_amount: float
 
     model_config = {"from_attributes": True}
+
+    @computed_field
+    @property
+    def subtotal(self) -> float:
+        taxable_amount, _ = compute_line_taxable_and_gst(self.quantity, self.unit_price, self.gst_rate)
+        return taxable_amount
+
+    @computed_field
+    @property
+    def gst_amount(self) -> float:
+        _, gst_amount = compute_line_taxable_and_gst(self.quantity, self.unit_price, self.gst_rate)
+        return gst_amount
+
+    @computed_field
+    @property
+    def total_amount(self) -> float:
+        taxable_amount, gst_amount = compute_line_taxable_and_gst(self.quantity, self.unit_price, self.gst_rate)
+        return round(taxable_amount + gst_amount, 2)
 
 class SaleCreate(BaseModel):
     po_id: int
@@ -104,10 +120,7 @@ class SaleOut(BaseModel):
     invoice_number: Optional[str] = None
     client_name: str
     project: Optional[str] = None
-    subtotal: float
-    gst_amount: float
     freight: float
-    grand_total: float
     payment_status: PaymentStatus
     payment_note: Optional[str] = None
     created_at: UTCDatetime
@@ -130,6 +143,23 @@ class SaleOut(BaseModel):
     activities: List[SaleActivityOut] = []
 
     model_config = {"from_attributes": True}
+
+    @computed_field
+    @property
+    def subtotal(self) -> float:
+        taxable_amount, _ = compute_sale_taxable_and_gst(self.items)
+        return taxable_amount
+
+    @computed_field
+    @property
+    def gst_amount(self) -> float:
+        _, gst_amount = compute_sale_taxable_and_gst(self.items)
+        return gst_amount
+
+    @computed_field
+    @property
+    def grand_total(self) -> float:
+        return compute_sale_grand_total(self.subtotal, self.gst_amount, self.freight)
 
     @computed_field
     @property

@@ -1,34 +1,37 @@
 # pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.database import get_db
 from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus
 from app.schemas.dashboard import DashboardStats, ChartData, ChartDataPoint, MonthlyTrend, RecentSale
+from app.utils.helpers import compute_sale_taxable_and_gst, compute_sale_grand_total, normalize_client_name
 from typing import List, cast, Any
 
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
 
 
-def normalize_client_name(name: str) -> str:
-    if not name:
-        return ""
-    # Casing, prefixes/suffixes, dots, commas, spaces, and generic terms
-    n = name.upper()
-    n = n.replace("M/S.", "").replace("M/S", "").replace("LIMITED", "").replace("LTD.", "").replace("LTD", "")
-    n = n.replace("PRIVATE", "").replace("PVT.", "").replace("PVT", "")
-    n = n.replace("PROJECTS", "").replace("PRODUCT", "")
-    n = n.replace(".", "").replace(",", "").replace(" ", "").strip()
-    return n
-
-
 @router.get("/stats", response_model=DashboardStats)
 def get_stats(db: Session = Depends(get_db)):
-    # Total revenue: same source as the Reports page (Sale.grand_total) so both agree
-    total_revenue = db.query(func.sum(Sale.grand_total)).scalar() or 0
+    # Fetch every Sale exactly once (eager-loading items so Grand Total can be
+    # computed fresh below without N+1 queries) and reuse this single fetch
+    # for every metric that needs it. No separate aggregate query, no stored
+    # dashboard total, no join that could duplicate a row.
+    all_sales = db.query(Sale).options(joinedload(Sale.items)).all()
+
+    # Total revenue: computed with the exact same formula as the Sales Report
+    # (Taxable Amount + GST from each sale's own line items, then + Freight),
+    # summed once per Sale record — never read from the stored
+    # Sale.grand_total column, so this can never drift from the Sales Report
+    # or the Sales page, and is recalculated from scratch on every request.
+    total_revenue = 0.0
+    for s in all_sales:
+        taxable_amount, gst_amount = compute_sale_taxable_and_gst(s.items)
+        total_revenue += compute_sale_grand_total(taxable_amount, gst_amount, float(s.freight or 0))
+    total_revenue = round(total_revenue, 2)
 
     # Total number of dispatches
-    total_orders = db.query(func.count(Sale.id)).scalar() or 0
+    total_orders = len(all_sales)
     # Total unique clients with smart normalization (ignores M/s, LTD, LIMITED, casing)
     all_po_clients = db.query(PurchaseOrder.client_name).all()
     normalized_names = set()
@@ -37,9 +40,8 @@ def get_stats(db: Session = Depends(get_db)):
         if n:
             normalized_names.add(n)
     total_clients = len(normalized_names) or 0
-    
+
     # Delivered orders should be those that have enough challans AND the PO is finished
-    all_sales = db.query(Sale).all()
     delivered_orders = 0
     for s in all_sales:
         if s.delivery_status == "Delivered":
@@ -78,14 +80,22 @@ def get_stats(db: Session = Depends(get_db)):
 @router.get("/charts", response_model=ChartData)
 def get_charts(db: Session = Depends(get_db)):
     from app.models.models import SaleItem
+
+    # Same GST formula as everywhere else (Taxable Amount = quantity x
+    # unit_price, GST = Taxable Amount x gst_rate / 100), expressed in SQL so
+    # it can be aggregated efficiently — never SaleItem.total_amount, which is
+    # only a snapshot stored at the time the sale was created.
+    item_taxable_expr = SaleItem.quantity * SaleItem.unit_price
+    item_total_expr = item_taxable_expr + (item_taxable_expr * SaleItem.gst_rate / 100)
+
     product_rows = (
-        db.query(SaleItem.item, func.sum(SaleItem.total_amount).label("total"))
+        db.query(SaleItem.item, func.sum(item_total_expr).label("total"))
         .group_by(SaleItem.item)
-        .order_by(func.sum(SaleItem.total_amount).desc())
+        .order_by(func.sum(item_total_expr).desc())
         .limit(10)
         .all()
     )
-    sales_by_product = [ChartDataPoint(name=r.item, value=r.total or 0) for r in product_rows]
+    sales_by_product = [ChartDataPoint(name=r.item, value=float(r.total or 0)) for r in product_rows]
 
     # Payment Status distribution
     payment_rows = (
@@ -108,7 +118,7 @@ def get_charts(db: Session = Depends(get_db)):
     monthly_items = (
         db.query(
             func.date_format(Sale.created_at, "%b %Y").label("month"),
-            func.sum(SaleItem.subtotal + SaleItem.gst_amount).label("items_total"),
+            func.sum(item_total_expr).label("items_total"),
             func.count(func.distinct(Sale.id)).label("orders"),
             func.min(Sale.created_at).label("sort_date")
         )
