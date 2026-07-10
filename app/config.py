@@ -35,6 +35,14 @@ class Settings(BaseSettings):
 
     @property
     def DATABASE_URL(self) -> str:
+        # Railway's reference variable (e.g. DATABASE_URL=${{MySQL.MYSQL_URL}})
+        # injects a ready-to-use connection string directly as DATABASE_URL.
+        # This takes precedence over everything else.
+        env_database_url = os.getenv("DATABASE_URL")
+        if env_database_url:
+            if env_database_url.startswith("mysql+pymysql://"):
+                return env_database_url
+            return env_database_url.replace("mysql://", "mysql+pymysql://", 1)
         if self.MYSQL_URL:
             # Railway provides a "mysql://" scheme; SQLAlchemy needs the
             # pymysql driver specified explicitly.
