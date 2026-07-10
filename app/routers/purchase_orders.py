@@ -6,7 +6,7 @@ from datetime import datetime
 from app.database import get_db
 from app.models.models import PurchaseOrder, POLineItem
 from app.schemas.purchase_order import PurchaseOrderCreate, PurchaseOrderUpdate, PurchaseOrderOut, PurchaseOrderShortClose
-from app.utils.helpers import log_activity
+from app.utils.helpers import log_activity, recalc_po_delivered_quantities
 from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
     parse_optional_datetime, make_excel_response, style_header_row,
@@ -120,37 +120,23 @@ def export_purchase_orders(db: Session = Depends(get_db)):
 
 @router.post("/recalculate-delivered")
 def recalculate_delivered_quantities(db: Session = Depends(get_db)):
-    """Rebuild POLineItem.delivered_quantity from actual SaleItem records.
-    Matches by line_item_id first, then falls back to item name matching."""
-    from app.models.models import Sale, SaleItem
+    """Rebuild delivered_quantity for every PO/line item from actual SaleItem records.
 
+    create_sale/update_sale/delete_sale now keep this in sync automatically after
+    every mutation (see recalc_po_delivered_quantities), so this endpoint is a
+    manual safety net for repairing any data written before that fix, not a
+    routine requirement."""
     orders = db.query(PurchaseOrder).all()
     fixed = 0
     for po in orders:
-        if not po.line_items:
-            continue
-        for li in po.line_items:
-            # Sum all SaleItems linked directly by ID
-            by_id = db.query(SaleItem).filter(SaleItem.line_item_id == li.id).all()
-            total = sum(float(si.quantity or 0) for si in by_id)
-
-            # Also count SaleItems on this PO linked by name (where line_item_id is null)
-            po_sale_ids = [s.id for s in po.sales]
-            if po_sale_ids:
-                by_name = db.query(SaleItem).filter(
-                    SaleItem.sale_id.in_(po_sale_ids),
-                    SaleItem.line_item_id.is_(None),
-                    SaleItem.item.ilike(li.item),
-                ).all()
-                total += sum(float(si.quantity or 0) for si in by_name)
-
-            new_val = round(max(0, total), 10)
-            if abs(new_val - float(li.delivered_quantity or 0)) > 0.0001:
-                li.delivered_quantity = new_val
-                fixed += 1
+        before = {li.id: li.delivered_quantity for li in po.line_items} if po.line_items else {"__po__": po.delivered_quantity}
+        recalc_po_delivered_quantities(db, po)
+        after = {li.id: li.delivered_quantity for li in po.line_items} if po.line_items else {"__po__": po.delivered_quantity}
+        if before != after:
+            fixed += 1
 
     db.commit()
-    return {"fixed_line_items": fixed}
+    return {"fixed_purchase_orders": fixed}
 
 
 # ── Excel import ──────────────────────────────────────────────────────────────
