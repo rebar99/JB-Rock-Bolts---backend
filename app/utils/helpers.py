@@ -27,6 +27,43 @@ def compute_sale_financials(
     }
 
 
+def recalc_po_delivered_quantities(db: Session, po) -> None:
+    """Rebuild PurchaseOrder/POLineItem delivered_quantity from actual SaleItem rows.
+
+    This always recomputes from scratch (fresh SUM over SaleItem, the source of
+    truth for real dispatches) instead of accumulating with +=/-=, so the stored
+    value can never drift upward from duplicate/retried calls — it is simply
+    overwritten with whatever the Sales table actually contains.
+    """
+    from sqlalchemy import func
+    from app.models.models import Sale, SaleItem
+
+    if not po.line_items:
+        total = (
+            db.query(func.sum(SaleItem.quantity))
+            .join(Sale, SaleItem.sale_id == Sale.id)
+            .filter(Sale.po_id == po.id)
+            .scalar() or 0
+        )
+        po.delivered_quantity = round(max(0, float(total)), 10)
+        return
+
+    po_sale_ids = [s.id for s in po.sales]
+    total_all = 0.0
+    for li in po.line_items:
+        by_id = db.query(func.sum(SaleItem.quantity)).filter(SaleItem.line_item_id == li.id).scalar() or 0
+        by_name = 0.0
+        if po_sale_ids:
+            by_name = db.query(func.sum(SaleItem.quantity)).filter(
+                SaleItem.sale_id.in_(po_sale_ids),
+                SaleItem.line_item_id.is_(None),
+                SaleItem.item.ilike(li.item),
+            ).scalar() or 0
+        li.delivered_quantity = round(max(0, float(by_id) + float(by_name)), 10)
+        total_all += li.delivered_quantity
+    po.delivered_quantity = round(max(0, total_all), 10)
+
+
 def derive_inventory_status(quantity: int) -> str:
     from app.models.models import InventoryStatus
     if quantity <= 0:
