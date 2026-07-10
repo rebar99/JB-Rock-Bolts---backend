@@ -10,12 +10,6 @@ class DashboardStats(BaseModel):
     pending_payments: int
 
 
-class POSummaryStats(BaseModel):
-    total_quantity: float
-    delivered_quantity: float
-    pending_quantity: float
-
-
 class ChartDataPoint(BaseModel):
     name: str
     value: float

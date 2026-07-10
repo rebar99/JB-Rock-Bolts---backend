@@ -3,8 +3,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.database import get_db
-from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus, POLineItem, SaleItem
-from app.schemas.dashboard import DashboardStats, ChartData, ChartDataPoint, MonthlyTrend, RecentSale, POSummaryStats
+from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus
+from app.schemas.dashboard import DashboardStats, ChartData, ChartDataPoint, MonthlyTrend, RecentSale
 from typing import List, cast, Any
 
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
@@ -73,35 +73,6 @@ def get_stats(db: Session = Depends(get_db)):
         pending_payments=pending_payments,
     )
 
-
-@router.get("/po-summary", response_model=POSummaryStats)
-def get_po_summary(db: Session = Depends(get_db)):
-    """Purchase Order dashboard totals (Total / Delivered / Pending Quantity).
-
-    Recalculated from scratch on every call — no cached values, no in-memory
-    accumulation, nothing stored in the database for Pending. Total is summed
-    from po_line_items (falling back to the legacy single-item total for any
-    PO that has no line items). Delivered is summed directly from the Sales
-    table (sale_items), the actual source of dispatched quantity, so it can
-    never drift from repeated calls, deploys, or restarts.
-    """
-    line_items_total = db.query(func.sum(POLineItem.quantity)).scalar() or 0
-    legacy_total = (
-        db.query(func.sum(PurchaseOrder.total_quantity))
-        .filter(~PurchaseOrder.line_items.any())
-        .scalar() or 0
-    )
-    total_quantity = float(line_items_total) + float(legacy_total)
-
-    delivered_quantity = float(db.query(func.sum(SaleItem.quantity)).scalar() or 0)
-
-    pending_quantity = round(max(0, total_quantity - delivered_quantity), 10)
-
-    return POSummaryStats(
-        total_quantity=round(total_quantity, 10),
-        delivered_quantity=round(delivered_quantity, 10),
-        pending_quantity=pending_quantity,
-    )
 
 
 @router.get("/charts", response_model=ChartData)
