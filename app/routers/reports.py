@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 from typing import Optional
 from datetime import datetime
@@ -9,9 +8,11 @@ from app.schemas.reports import (
     ReportOut, ReportRow, FulfillmentReportOut, FulfillmentReportRow,
     PendingPOReportOut, PendingPORow
 )
+from app.schemas.purchase_order import PurchaseOrderOut
 from app.routers.upload_helpers import (
     read_upload_bytes, parse_import_file, make_excel_response, style_header_row,
 )
+from app.utils.helpers import compute_sale_taxable_and_gst, compute_sale_grand_total
 
 router = APIRouter(prefix="/api/reports", tags=["Reports"])
 
@@ -36,7 +37,13 @@ def get_report(
         q = q.filter(Sale.created_at <= to_date_end)
     if product:
         from app.models.models import SaleItem
-        q = q.join(Sale.items).filter(SaleItem.item.ilike(f"%{product}%"))
+        # Filter via a correlated EXISTS (Sale.items.any(...)) instead of an
+        # explicit JOIN. A JOIN here — combined with the joinedload(Sale.items)
+        # below — fans out one row per matching SaleItem times one row per
+        # eager-loaded item, so a multi-item invoice gets counted (and its
+        # GST/subtotal/price summed) more than once. any() adds a WHERE EXISTS
+        # clause instead, which can't multiply the Sale row at all.
+        q = q.filter(Sale.items.any(SaleItem.item.ilike(f"%{product}%")))
     if client and client.lower() != "all":
         q = q.filter(Sale.client_name.ilike(f"%{client}%"))
 
@@ -44,17 +51,41 @@ def get_report(
         joinedload(Sale.items),
         joinedload(Sale.purchase_order),
     ).order_by(Sale.created_at.desc()).limit(limit).all()
-    total_revenue_db = db.query(func.sum(Sale.grand_total)).scalar() or 0
+
+    # Belt-and-suspenders: guarantee every Sale contributes to the report
+    # exactly once, regardless of how the query above is written.
+    seen_ids = set()
+    deduped_sales = []
+    for s in sales:
+        if s.id not in seen_ids:
+            seen_ids.add(s.id)
+            deduped_sales.append(s)
+    sales = deduped_sales
+
+    # total_revenue is accumulated below from the exact same row_price values
+    # that populate `rows` — no separate SQL SUM query. That guarantees the
+    # "Filtered Revenue" summary card (which reads this field) can never
+    # disagree with the table footer (which sums rows.price on the frontend):
+    # they are, byte-for-byte, sums of the same numbers.
     rows = []
     total_revenue = 0
     for s in sales:
-        row_price = float(s.grand_total or 0)
-        total_revenue += row_price
-
         po = s.purchase_order
         dispatched_qty = round(sum(item.quantity for item in s.items), 10)
         total_qty = round(float(po.total_qty if po else 0), 10)
         pending_qty = round(float(po.pending_quantity if po else 0), 10)
+
+        # Fresh, independent GST calculation for this Sales record only:
+        # Taxable Amount and GST Amount are derived straight from this sale's
+        # own line items (quantity x unit_price, and x gst_rate/100) — never
+        # from the stored Sale.subtotal/gst_amount aggregate columns. Grand
+        # Total is then derived from these same two numbers (+ freight), the
+        # same formula used everywhere else Grand Total is shown, so the
+        # Sales Report can never disagree with the Sales page over GST.
+        taxable_amount, gst_amount = compute_sale_taxable_and_gst(s.items)
+        row_price = compute_sale_grand_total(taxable_amount, gst_amount, float(s.freight or 0))
+        total_revenue += row_price
+
         rows.append(ReportRow(
             id=s.id,
             date=s.created_at.strftime("%d-%m-%Y") if s.created_at else "",
@@ -65,8 +96,8 @@ def get_report(
             invoice_number=s.invoice_number,
             e_way_bill_no=s.e_way_bill_no,
             price=row_price,
-            subtotal=round(float(s.subtotal or 0), 2),
-            gst_amount=round(float(s.gst_amount or 0), 2),
+            subtotal=taxable_amount,
+            gst_amount=gst_amount,
             payment_status=s.payment_status.value if hasattr(s.payment_status, 'value') else str(s.payment_status),
             delivery_status="Dispatched",
             payment_note=s.payment_note,
@@ -81,7 +112,7 @@ def get_report(
 
     return ReportOut(
         rows=rows,
-        total_revenue=round(total_revenue_db, 2),
+        total_revenue=round(total_revenue, 2),
         record_count=record_count,
         avg_order_value=round(avg_order_value, 2),
     )
@@ -96,7 +127,7 @@ def get_fulfillment_report(
     client: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(PurchaseOrder)
+    q = db.query(PurchaseOrder).options(joinedload(PurchaseOrder.line_items))
     if from_date:
         q = q.filter(PurchaseOrder.created_at >= from_date)
     if to_date:
@@ -108,22 +139,32 @@ def get_fulfillment_report(
 
     orders = q.order_by(PurchaseOrder.created_at.desc()).all()
 
-    rows = [
-        FulfillmentReportRow(
+    # Required/Delivered/Pending here are read from PurchaseOrderOut — the
+    # exact same schema GET /api/purchase-orders uses to populate the
+    # Purchase Orders table. This isn't "the same formula re-implemented":
+    # it's the same computed_field code path, so there is no second place
+    # these numbers could be calculated differently or drift out of sync.
+    # Each PO is validated into PurchaseOrderOut exactly once (one row per
+    # PurchaseOrder here, no JOIN to Sales/SaleItem that could duplicate it),
+    # and PurchaseOrderOut.pending_quantity is itself total_quantity minus
+    # delivered_quantity, so Required = Delivered + Pending holds for every
+    # row — and therefore for the footer sums too.
+    rows = []
+    for o in orders:
+        po_out = PurchaseOrderOut.model_validate(o)
+        rows.append(FulfillmentReportRow(
             id=o.id,
             po_number=o.po_number,
             date=o.created_at.strftime("%d-%m-%Y") if o.created_at else "—",
             client_name=o.client_name,
             project=o.project or "—",
             item=o.items_display,
-            total_required=o.total_quantity,
-            delivered=o.delivered_quantity,
-            pending=round(max(0, o.total_quantity - o.delivered_quantity), 10),
-            uom=o.uom or "Nos",
+            total_required=po_out.total_quantity,
+            delivered=po_out.delivered_quantity,
+            pending=po_out.pending_quantity,
+            uom=po_out.uom,
             remark=o.remark,
-        )
-        for o in orders
-    ]
+        ))
 
     return FulfillmentReportOut(rows=rows)
 
@@ -134,7 +175,12 @@ def get_fulfillment_report(
 def get_pending_pos_report(db: Session = Depends(get_db)):
     from app.models.models import DeliveryStatus
 
-    all_pos = db.query(PurchaseOrder).order_by(PurchaseOrder.created_at.desc()).all()
+    all_pos = (
+        db.query(PurchaseOrder)
+        .options(joinedload(PurchaseOrder.sales).joinedload(Sale.items))
+        .order_by(PurchaseOrder.created_at.desc())
+        .all()
+    )
     pending_orders = [o for o in all_pos if o.delivery_status != DeliveryStatus.DELIVERED]
 
     rows = []
@@ -152,10 +198,16 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
         t_qty = float(o.total_qty or 0)
         d_qty = float(o.delivered_qty or 0)
 
-        # Delivered payment = sum of actual invoiced amounts against this PO
-        delivered_sub = sum(float(s.subtotal or 0) for s in o.sales)
-        delivered_gst_amt = sum(float(s.gst_amount or 0) for s in o.sales)
-        delivered_payment = sum(float(s.grand_total or 0) for s in o.sales)
+        # Delivered payment = sum of actual invoiced amounts against this PO,
+        # each Sale calculated fresh via the same shared helpers as the Sales
+        # Report/Dashboard — never the stored Sale.subtotal/gst_amount/
+        # grand_total columns, which are only a snapshot from sale creation.
+        delivered_sub = delivered_gst_amt = delivered_payment = 0.0
+        for s in o.sales:
+            s_taxable, s_gst = compute_sale_taxable_and_gst(s.items)
+            delivered_sub += s_taxable
+            delivered_gst_amt += s_gst
+            delivered_payment += compute_sale_grand_total(s_taxable, s_gst, float(s.freight or 0))
 
         p_sub = max(0, t_sub - delivered_sub)
         p_gst = max(0, t_gst - delivered_gst_amt)

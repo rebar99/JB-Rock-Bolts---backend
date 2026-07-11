@@ -2,16 +2,20 @@ from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile,
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+from decimal import Decimal
 import os
 import uuid
 from pydantic import BaseModel
 from app.database import get_db
-from app.utils.helpers import generate_invoice_number, compute_sale_financials, log_activity
+from app.utils.helpers import (
+    generate_invoice_number, log_activity, recalc_po_delivered_quantities,
+    compute_line_taxable_and_gst, compute_sale_taxable_and_gst, compute_sale_grand_total,
+)
 from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
     parse_optional_datetime, make_excel_response, style_header_row,
 )
-from app.models.models import Sale, SaleActivity, PurchaseOrder, SaleItem, POLineItem
+from app.models.models import Sale, SaleActivity, PurchaseOrder, SaleItem
 from app.schemas.sale import SaleCreate, SaleUpdate, SaleOut, SaleActivityCreate, SaleActivityOut, SaleItemCreate
 
 router = APIRouter(prefix="/api/sales", tags=["Sales"])
@@ -97,8 +101,14 @@ def export_sales(db: Session = Depends(get_db)):
     style_header_row(ws, len(headers))
 
     for s in sales:
+        # Same shared helpers as the Sales Report/Dashboard — never the stored
+        # Sale.subtotal/gst_amount/grand_total or SaleItem.subtotal/gst_amount
+        # columns, which are only a snapshot from when the sale was created.
+        s_taxable, s_gst = compute_sale_taxable_and_gst(s.items)
+        s_grand_total = compute_sale_grand_total(s_taxable, s_gst, float(s.freight or 0))
         items = s.items if s.items else [None]
         for si in items:
+            si_taxable, si_gst = compute_line_taxable_and_gst(si.quantity, si.unit_price, si.gst_rate) if si else (0.0, 0.0)
             ws.append([
                 s.invoice_number or "",
                 s.po_number or "",
@@ -110,10 +120,10 @@ def export_sales(db: Session = Depends(get_db)):
                 float(si.unit_price or 0) if si else 0,
                 float(si.gst_rate or 0) if si else 0,
                 s.hsn_code or "",
-                float(si.subtotal or 0) if si else float(s.subtotal or 0),
-                float(si.gst_amount or 0) if si else float(s.gst_amount or 0),
+                si_taxable if si else s_taxable,
+                si_gst if si else s_gst,
                 float(s.freight or 0),
-                float(s.grand_total or 0),
+                s_grand_total,
                 s.payment_status.value if hasattr(s.payment_status, "value") else str(s.payment_status or ""),
                 s.payment_note or "",
                 s.payment_terms or "",
@@ -378,20 +388,16 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db)):
         )
         db.add(sale_item)
 
-        po.delivered_quantity += item_data.quantity
-        if item_data.line_item_id:
-            li = db.get(POLineItem, item_data.line_item_id)
-            if li:
-                li.delivered_quantity += item_data.quantity
-                sale_item.line_item_id = li.id
-        else:
+        if not item_data.line_item_id:
             matching_li = next(
                 (l for l in po.line_items if l.item.lower().strip() == item_data.item.lower().strip()),
                 None
             )
             if matching_li:
-                matching_li.delivered_quantity += item_data.quantity
                 sale_item.line_item_id = matching_li.id
+
+    db.flush()
+    recalc_po_delivered_quantities(db, po)
 
     activity = SaleActivity(
         sale_id=sale.id,
@@ -435,14 +441,6 @@ def update_sale(sale_id: int, payload: SaleUpdate, db: Session = Depends(get_db)
                 detail="Cannot modify dispatch items for a Short Closed Purchase Order."
             )
 
-        for old_item in sale.items:
-            if po:
-                po.delivered_quantity = max(0, po.delivered_quantity - old_item.quantity)
-            if old_item.line_item_id:
-                li = db.get(POLineItem, old_item.line_item_id)
-                if li:
-                    li.delivered_quantity = max(0, li.delivered_quantity - old_item.quantity)
-
         db.query(SaleItem).filter(SaleItem.sale_id == sale.id).delete()
 
         for item_data in new_items_data:
@@ -460,26 +458,23 @@ def update_sale(sale_id: int, payload: SaleUpdate, db: Session = Depends(get_db)
                 total_amount=item_data.get("total_amount", 0),
             )
             db.add(new_item)
-            if po:
-                po.delivered_quantity += item_data.get("quantity", 0)
-            if li_id:
-                li = db.get(POLineItem, li_id)
-                if li:
-                    li.delivered_quantity += item_data.get("quantity", 0)
-                    new_item.line_item_id = li.id
-            else:
+            if not li_id and po:
                 matching_li = next(
                     (l for l in po.line_items if l.item.lower().strip() == (item_data.get("item") or "").lower().strip()),
                     None
-                ) if po else None
+                )
                 if matching_li:
-                    matching_li.delivered_quantity += item_data.get("quantity", 0)
                     new_item.line_item_id = matching_li.id
+
+        db.flush()
+        if po:
+            recalc_po_delivered_quantities(db, po)
 
     changed_fields = []
     for field, value in updates.items():
         old_val = getattr(sale, field, None)
-        if old_val != value:
+        compare_val = float(old_val) if isinstance(old_val, Decimal) else old_val
+        if compare_val != value:
             changed_fields.append(field)
             setattr(sale, field, value)
 
@@ -559,15 +554,10 @@ def delete_sale(sale_id: int, deleted_by: Optional[str] = None, db: Session = De
 
     po = db.get(PurchaseOrder, sale.po_id)
 
-    for item in sale.items:
-        if po:
-            po.delivered_quantity = max(0, po.delivered_quantity - item.quantity)
-        if item.line_item_id:
-            li = db.get(POLineItem, item.line_item_id)
-            if li:
-                li.delivered_quantity = max(0, li.delivered_quantity - item.quantity)
-
     db.delete(sale)
+    db.flush()
+    if po:
+        recalc_po_delivered_quantities(db, po)
     db.commit()
     log_activity(db, "Sale Deleted", "Sale", f"Deleted sale invoice {sale.invoice_number} for {sale.client_name}.", deleted_by or "System", sale_id, entity_name=sale.invoice_number)
 
