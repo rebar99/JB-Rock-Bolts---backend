@@ -37,6 +37,11 @@ class User(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
+    @property
+    def is_admin(self) -> bool:
+        from app.config import settings
+        return self.email.strip().lower() == settings.ADMIN_EMAIL.strip().lower()
+
 
 class Client(Base):
     __tablename__ = "clients"

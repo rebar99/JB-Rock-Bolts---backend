@@ -21,6 +21,7 @@ class UserOut(BaseModel):
     name: str
     email: str
     is_active: bool
+    is_admin: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
