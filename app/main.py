@@ -186,6 +186,12 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         pass
 
+            # Existing users predate the approval workflow — grandfather them in as active
+            try:
+                conn.execute(text("UPDATE users SET is_active = TRUE WHERE is_active IS NULL"))
+            except Exception:
+                pass
+
             # Safely create user_sessions table
             try:
                 conn.execute(text("SELECT id FROM user_sessions LIMIT 1"))

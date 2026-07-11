@@ -44,6 +44,18 @@ def _get_user_id_from_token(authorization: str) -> Optional[int]:
         return None
 
 
+def _require_admin(authorization: str, db: Session) -> User:
+    if not authorization:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token.")
+    user_id = _get_user_id_from_token(authorization)
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token.")
+    user = db.get(User, user_id)
+    if not user or not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required.")
+    return user
+
+
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 def register(payload: UserCreate, db: Session = Depends(get_db)):
     if db.query(User).filter(User.email == payload.email).first():
@@ -55,6 +67,7 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
         name=payload.name,
         email=payload.email,
         hashed_password=hash_password(payload.password),
+        is_active=False,
     )
     db.add(user)
     db.commit()
@@ -62,11 +75,76 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
 
     log_activity(
         db, "User Registered", "User",
-        f"New user {user.name} registered.",
+        f"New user {user.name} registered and is awaiting admin approval.",
         user.name, user.id,
         entity_name=user.name,
     )
     return user
+
+
+@router.get("/pending", response_model=List[UserOut])
+def list_pending_users(
+    authorization: str = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Admin-only: users who registered but have not yet been approved."""
+    _require_admin(authorization, db)
+    return (
+        db.query(User)
+        .filter(User.is_active == False)
+        .order_by(User.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/{user_id}/approve", response_model=UserOut)
+def approve_user(
+    user_id: int,
+    authorization: str = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Admin-only: approve a pending registration so the user can log in."""
+    admin = _require_admin(authorization, db)
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    user.is_active = True
+    db.commit()
+    db.refresh(user)
+
+    log_activity(
+        db, "User Approved", "User",
+        f"User {user.name} was approved by {admin.name}.",
+        admin.name, user.id,
+        entity_name=user.name,
+    )
+    return user
+
+
+@router.post("/{user_id}/reject")
+def reject_user(
+    user_id: int,
+    authorization: str = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Admin-only: reject a pending registration, removing it entirely."""
+    admin = _require_admin(authorization, db)
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if user.is_active:
+        raise HTTPException(status_code=400, detail="User is already approved.")
+
+    name = user.name
+    db.delete(user)
+    db.commit()
+
+    log_activity(
+        db, "User Rejected", "User",
+        f"Registration request from {name} was rejected by {admin.name}.",
+        admin.name, entity_name=name,
+    )
+    return {"message": "Registration request rejected."}
 
 
 @router.post("/login", response_model=Token)
@@ -76,6 +154,11 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin has not approved your request yet.",
         )
     token = create_access_token(user.id)
 
