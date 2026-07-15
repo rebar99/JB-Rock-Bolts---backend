@@ -15,8 +15,11 @@ from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
     parse_optional_datetime, make_excel_response, style_header_row,
 )
-from app.models.models import Sale, SaleActivity, PurchaseOrder, SaleItem
-from app.schemas.sale import SaleCreate, SaleUpdate, SaleOut, SaleActivityCreate, SaleActivityOut, SaleItemCreate
+from app.models.models import Sale, SaleActivity, PurchaseOrder, SaleItem, SaleDispatch, SaleDispatchItem
+from app.schemas.sale import (
+    SaleCreate, SaleUpdate, SaleOut, SaleActivityCreate, SaleActivityOut, SaleItemCreate,
+    SaleDispatchCreate, SaleDispatchOut,
+)
 
 router = APIRouter(prefix="/api/sales", tags=["Sales"])
 
@@ -407,6 +410,37 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db)):
         by=payload.created_by,
     )
     db.add(activity)
+
+    # The initial dispatch event — one row per actual dispatch, so PO
+    # fulfillment history can show every dispatch separately (see
+    # SaleDispatch model docstring). Each item dispatched keeps its own
+    # quantity/uom (SaleDispatchItem) so a dispatch mixing units (e.g. Meter
+    # + Nos) never gets summed into one misleading combined quantity.
+    dispatch = SaleDispatch(
+        sale_id=sale.id,
+        quantity=sum(i.quantity for i in payload.items),
+        uom=payload.items[0].uom if payload.items else "Nos",
+        subtotal=payload.subtotal,
+        gst_amount=payload.gst_amount,
+        amount=payload.grand_total,
+        invoice_number=sale.invoice_number,
+        e_way_bill_no=payload.e_way_bill_no,
+        by=payload.created_by,
+    )
+    db.add(dispatch)
+    db.flush()
+    for item_data in payload.items:
+        item_taxable, item_gst = compute_line_taxable_and_gst(item_data.quantity, item_data.unit_price, item_data.gst_rate)
+        db.add(SaleDispatchItem(
+            dispatch_id=dispatch.id,
+            item=item_data.item,
+            uom=item_data.uom,
+            quantity=item_data.quantity,
+            subtotal=item_taxable,
+            gst_amount=item_gst,
+            amount=item_taxable + item_gst,
+        ))
+
     db.commit()
     db.refresh(sale)
 
@@ -441,7 +475,33 @@ def update_sale(sale_id: int, payload: SaleUpdate, db: Session = Depends(get_db)
                 detail="Cannot modify dispatch items for a Short Closed Purchase Order."
             )
 
+        removed_item_names = {si.item for si in sale.items} - {
+            item_data.get("item") for item_data in new_items_data
+        }
+
         db.query(SaleItem).filter(SaleItem.sale_id == sale.id).delete()
+
+        if removed_item_names:
+            # An item removed from the invoice must also disappear from the
+            # PO Fulfillment Summary's dispatch history — that panel reads
+            # SaleDispatchItem rows (recorded at dispatch time), which are a
+            # separate table from SaleItem and are otherwise never touched
+            # when items are edited/removed here.
+            for d in sale.dispatches:
+                if not d.items:
+                    continue
+                kept = [di for di in d.items if di.item not in removed_item_names]
+                if len(kept) == len(d.items):
+                    continue
+                for di in list(d.items):
+                    if di.item in removed_item_names:
+                        db.delete(di)
+                if not kept:
+                    # Every tracked item in this dispatch event was removed —
+                    # drop the event itself so it can't fall back to its now
+                    # stale aggregate quantity/amount (which still includes
+                    # the deleted item) in the summary.
+                    db.delete(d)
 
         for item_data in new_items_data:
             li_id = item_data.get("line_item_id") if (item_data.get("line_item_id") and item_data.get("line_item_id") > 0) else None
@@ -578,3 +638,53 @@ def add_activity(sale_id: int, payload: SaleActivityCreate, db: Session = Depend
     db.commit()
     db.refresh(activity)
     return activity
+
+
+@router.delete("/{sale_id}/dispatches/{dispatch_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_sale_dispatch(sale_id: int, dispatch_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
+    """Remove one dispatch event (e.g. a mistaken 'Dispatch More' entry) so it
+    stops showing up in the PO Fulfillment Summary's dispatch history. This
+    only removes the dispatch log entry — it does not touch the sale's
+    invoiced SaleItem rows/quantities, which remain the source of truth for
+    Delivered/Pending totals. To reduce invoiced quantity, edit the sale's
+    items instead."""
+    sale = db.get(Sale, sale_id)
+    if not sale:
+        raise HTTPException(status_code=404, detail="Sale not found.")
+
+    dispatch = db.get(SaleDispatch, dispatch_id)
+    if not dispatch or dispatch.sale_id != sale_id:
+        raise HTTPException(status_code=404, detail="Dispatch event not found.")
+
+    dispatch_label = dispatch.invoice_number or sale.invoice_number
+    db.delete(dispatch)
+    db.commit()
+    log_activity(
+        db, "Sale Dispatch Deleted", "Sale",
+        f"Removed dispatch event ({dispatch_label}) from sale invoice {sale.invoice_number}.",
+        deleted_by or "System", sale_id, entity_name=sale.invoice_number,
+    )
+
+
+@router.post("/{sale_id}/dispatches", response_model=SaleDispatchOut, status_code=status.HTTP_201_CREATED)
+def add_sale_dispatch(sale_id: int, payload: SaleDispatchCreate, db: Session = Depends(get_db)):
+    """Record one additional dispatch event ('Dispatch More') against an
+    existing invoice, so the PO fulfillment summary can list it separately
+    from the invoice's original dispatch — with its own date/qty/amount."""
+    sale = db.get(Sale, sale_id)
+    if not sale:
+        raise HTTPException(status_code=404, detail="Sale not found.")
+
+    data = payload.model_dump()
+    items_data = data.pop("items", [])
+
+    dispatch = SaleDispatch(sale_id=sale_id, **data)
+    db.add(dispatch)
+    db.flush()
+
+    for item_data in items_data:
+        db.add(SaleDispatchItem(dispatch_id=dispatch.id, **item_data))
+
+    db.commit()
+    db.refresh(dispatch)
+    return dispatch
