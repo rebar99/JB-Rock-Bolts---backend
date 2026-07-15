@@ -25,6 +25,57 @@ class SaleActivityOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class SaleDispatchItemCreate(BaseModel):
+    item: str
+    uom: str = "Nos"
+    quantity: float
+    subtotal: float = 0
+    gst_amount: float = 0
+    amount: float = 0
+
+
+class SaleDispatchItemOut(BaseModel):
+    id: int
+    dispatch_id: int
+    item: str
+    uom: str
+    quantity: float
+    subtotal: float
+    gst_amount: float
+    amount: float
+
+    model_config = {"from_attributes": True}
+
+
+class SaleDispatchCreate(BaseModel):
+    quantity: float
+    uom: str = "Nos"
+    subtotal: float = 0
+    gst_amount: float = 0
+    amount: float = 0
+    invoice_number: Optional[str] = None
+    e_way_bill_no: Optional[str] = None
+    by: Optional[str] = None
+    items: List[SaleDispatchItemCreate] = []
+
+
+class SaleDispatchOut(BaseModel):
+    id: int
+    sale_id: int
+    dispatched_at: UTCDatetime
+    quantity: float
+    uom: str
+    subtotal: float
+    gst_amount: float
+    amount: float
+    invoice_number: Optional[str] = None
+    e_way_bill_no: Optional[str] = None
+    by: Optional[str] = None
+    items: List[SaleDispatchItemOut] = []
+
+    model_config = {"from_attributes": True}
+
+
 class SaleItemCreate(BaseModel):
     line_item_id: Optional[int] = None
     item: str
@@ -141,6 +192,7 @@ class SaleOut(BaseModel):
     hsn_code: Optional[str] = None
     items: List[SaleItemOut] = []
     activities: List[SaleActivityOut] = []
+    dispatches: List[SaleDispatchOut] = []
 
     model_config = {"from_attributes": True}
 

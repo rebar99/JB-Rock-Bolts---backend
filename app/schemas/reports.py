@@ -86,3 +86,35 @@ class PendingPOReportOut(BaseModel):
     total_pending_value: float
     total_delivered_payment: float = 0
     count: int
+
+
+class DispatchHistoryRow(BaseModel):
+    date: str
+    invoice_number: Optional[str] = None
+    item: Optional[str] = None
+    dispatch_qty: float
+    uom: str
+    amount: float
+    sale_id: Optional[int] = None
+    dispatch_id: Optional[int] = None
+
+
+class POFulfillmentSummaryOut(BaseModel):
+    po_id: int
+    po_number: str
+    client_name: str
+    project: Optional[str] = None
+    po_date: Optional[str] = None
+    po_quantity: float
+    delivered_quantity: float
+    pending_quantity: float
+    uom: str
+    subtotal: float
+    gst_amount: float
+    grand_total: float
+    dispatch_history: List[DispatchHistoryRow]
+    total_dispatches: int
+    last_dispatch_date: Optional[str] = None
+    payment_received: float
+    pending_payment: float
+    delivery_status: str

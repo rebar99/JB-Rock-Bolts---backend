@@ -68,6 +68,7 @@ class PurchaseOrderBase(BaseModel):
     gst: Optional[str] = "0"
     freight: float = 0
     payment_terms: Optional[str] = None
+    po_date: Optional[datetime] = None
     validity_date: Optional[datetime] = None
     file_url: Optional[str] = None
     remark: Optional[str] = None
@@ -85,6 +86,7 @@ class PurchaseOrderUpdate(BaseModel):
     gst: Optional[str] = None
     freight: Optional[float] = None
     payment_terms: Optional[str] = None
+    po_date: Optional[datetime] = None
     validity_date: Optional[datetime] = None
     file_url: Optional[str] = None
     remark: Optional[str] = None
