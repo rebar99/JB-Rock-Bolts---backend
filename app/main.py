@@ -107,6 +107,19 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     pass
 
+            # Safely migrate purchase_orders.po_date / validity_date
+            for pd_col, pd_dtype in [
+                ("po_date", "DATETIME NULL"),
+                ("validity_date", "DATETIME NULL"),
+            ]:
+                try:
+                    conn.execute(text(f"SELECT {pd_col} FROM purchase_orders LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE purchase_orders ADD COLUMN {pd_col} {pd_dtype}"))
+                    except Exception:
+                        pass
+
             # Safely migrate purchase_orders short_closed columns
             for sc_col, sc_dtype in [
                 ("short_closed", "BOOLEAN DEFAULT FALSE NOT NULL"),
