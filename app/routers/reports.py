@@ -494,16 +494,18 @@ def export_combined_report(
     wb = Workbook()
     wb.remove(wb.active)  # drop the default empty sheet
 
-    if "fulfillment" in requested:
-        ws = wb.create_sheet("PO Fulfillment Report")
+    if "completed" in requested:
+        ws = wb.create_sheet("Completed PO")
         headers = ["Date", "Client Name", "Project", "PO Number", "Items",
-                   "PO Quantity", "Delivered", "Pending", "UOM"]
+                   "PO Quantity", "Delivered", "UOM"]
         ws.append(headers)
         style_header_row(ws, len(headers))
         data = get_fulfillment_report(from_date=from_date, to_date=to_date, client=client, db=db)
         for r in data.rows:
+            if r.pending > 0.0001:
+                continue
             ws.append([r.date, r.client_name, r.project, r.po_number, r.item,
-                       r.total_required, r.delivered, r.pending, r.uom])
+                       r.total_required, r.delivered, r.uom])
 
     if "sales" in requested:
         ws = wb.create_sheet("Sales Report")
@@ -580,6 +582,7 @@ async def import_combined_report_data(
     SHEET_ROUTES = {
         "Fulfillment Report": "purchase-orders",
         "PO Fulfillment Report": "purchase-orders",
+        "Completed PO": "purchase-orders",
         "Pending POs": "purchase-orders",
         "Sales Report": "sales",
     }
