@@ -101,6 +101,7 @@ class PurchaseOrder(Base):
     gst = Column(String(20), nullable=True, default="18")
     freight = Column(Float, nullable=False, default=0)
     payment_terms = Column(String(100), nullable=True)
+    po_date = Column(DateTime, nullable=True)
     validity_date = Column(DateTime, nullable=True)
     file_url = Column(String(500), nullable=True)
     remark = Column(Text, nullable=True)
@@ -353,6 +354,9 @@ class Sale(Base):
     activities = relationship(
         "SaleActivity", back_populates="sale", cascade="all, delete-orphan"
     )
+    dispatches = relationship(
+        "SaleDispatch", back_populates="sale", cascade="all, delete-orphan", order_by="SaleDispatch.dispatched_at"
+    )
 
 class SaleItem(Base):
     __tablename__ = "sale_items"
@@ -387,6 +391,50 @@ class SaleActivity(Base):
     by = Column(String(100), nullable=True)
 
     sale = relationship("Sale", back_populates="activities")
+
+
+class SaleDispatch(Base):
+    """One row per actual dispatch event against a Sale/invoice — the initial
+    dispatch at sale creation, plus one more per subsequent 'Dispatch More'.
+    Lets PO fulfillment history show each dispatch separately (with its own
+    date/qty/amount) instead of only one row per invoice."""
+
+    __tablename__ = "sale_dispatches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False)
+    dispatched_at = Column(DateTime, server_default=func.now())
+    quantity = Column(Float, nullable=False, default=0)
+    uom = Column(String(50), nullable=False, default="Nos")
+    subtotal = Column(Numeric(12, 2), nullable=False, default=0)
+    gst_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    amount = Column(Numeric(12, 2), nullable=False, default=0)
+    invoice_number = Column(String(50), nullable=True)
+    e_way_bill_no = Column(String(100), nullable=True)
+    by = Column(String(100), nullable=True)
+
+    sale = relationship("Sale", back_populates="dispatches")
+    items = relationship("SaleDispatchItem", back_populates="dispatch", cascade="all, delete-orphan")
+
+
+class SaleDispatchItem(Base):
+    """Per-item breakdown of one SaleDispatch — so a dispatch covering two
+    items with different units (e.g. one in Meter, one in Nos) shows each
+    item's own quantity/uom separately instead of one misleading summed
+    total."""
+
+    __tablename__ = "sale_dispatch_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    dispatch_id = Column(Integer, ForeignKey("sale_dispatches.id"), nullable=False)
+    item = Column(String(300), nullable=False)
+    uom = Column(String(50), nullable=False, default="Nos")
+    quantity = Column(Float, nullable=False, default=0)
+    subtotal = Column(Numeric(12, 2), nullable=False, default=0)
+    gst_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    amount = Column(Numeric(12, 2), nullable=False, default=0)
+
+    dispatch = relationship("SaleDispatch", back_populates="items")
 
 
 class Record(Base):

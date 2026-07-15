@@ -59,7 +59,7 @@ def export_purchase_orders(db: Session = Depends(get_db)):
     ws.title = "Purchase Orders"
 
     headers = [
-        "PO Number", "Client Name", "Project",
+        "PO Number", "PO Date", "Client Name", "Project",
         "Item Name", "Quantity", "Delivered Qty", "Pending Qty", "UOM", "Unit Price",
         "GST", "Freight", "Subtotal", "Row Total",
         "Payment Terms", "PO Validity Date", "PO Document URL", "Created By", "Remark",
@@ -82,7 +82,7 @@ def export_purchase_orders(db: Session = Depends(get_db)):
                 freight = float(li.freight or 0)
                 row_total = sub + gst_amt + freight
                 ws.append([
-                    o.po_number, o.client_name, o.project or "",
+                    o.po_number, o.po_date.strftime("%Y-%m-%d") if o.po_date else "", o.client_name, o.project or "",
                     li.item, qty, delivered, pending, li.uom or "Nos", price,
                     gst_str, freight, round(sub, 2), round(row_total, 2),
                     o.payment_terms or "",
@@ -103,7 +103,7 @@ def export_purchase_orders(db: Session = Depends(get_db)):
                 freight = float(o.freight or 0)
                 row_total = sub + gst_amt + freight
                 ws.append([
-                    o.po_number, o.client_name, o.project or "",
+                    o.po_number, o.po_date.strftime("%Y-%m-%d") if o.po_date else "", o.client_name, o.project or "",
                     o.item or "", qty, delivered, pending, o.uom or "Nos", price,
                     gst_str, freight, round(sub, 2), round(row_total, 2),
                     o.payment_terms or "",
@@ -222,9 +222,12 @@ async def import_purchase_orders(
                 existing.client_name = str(client_name)
                 existing.project = str(_field(base, ["project", "Project", "project_name"]) or existing.project or "")
                 existing.payment_terms = str(_field(base, ["payment_terms", "Payment Terms", "terms"]) or existing.payment_terms or "")
-                validity = parse_optional_datetime(_field(base, ["validity_date", "PO Validity Date", "validity", "po_date"]))
+                validity = parse_optional_datetime(_field(base, ["validity_date", "PO Validity Date", "validity"]))
                 if validity:
                     existing.validity_date = validity
+                po_date_val = parse_optional_datetime(_field(base, ["po_date", "PO Date"]))
+                if po_date_val:
+                    existing.po_date = po_date_val
                 gst_val = _field(base, ["gst", "GST", "gst_rate"])
                 if gst_val:
                     existing.gst = str(gst_val)
@@ -253,7 +256,8 @@ async def import_purchase_orders(
             "gst": str(_field(base, ["gst", "GST", "gst_rate"]) or "0"),
             "freight": _float(_field(base, ["freight", "Freight", "shipping_charge", "freight_amount"])),
             "payment_terms": str(_field(base, ["payment_terms", "Payment Terms", "terms"]) or ""),
-            "validity_date": parse_optional_datetime(_field(base, ["validity_date", "PO Validity Date", "validity", "po_date"])),
+            "po_date": parse_optional_datetime(_field(base, ["po_date", "PO Date"])),
+            "validity_date": parse_optional_datetime(_field(base, ["validity_date", "PO Validity Date", "validity"])),
             "remark": str(_field(base, ["remark", "Remark", "remarks", "Remarks", "note", "Note"]) or "") or None,
             "created_by": created_by or "Import",
             "line_items": line_items_raw,
