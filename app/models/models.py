@@ -54,6 +54,7 @@ class Client(Base):
     purchase_orders = relationship("PurchaseOrder", back_populates="client_rel")
     records = relationship("Record", back_populates="client_rel")
     projects = relationship("Project", back_populates="client_rel", cascade="all, delete-orphan")
+    work_orders = relationship("WorkOrder", back_populates="client_rel")
 
 
 class Project(Base):
@@ -66,6 +67,7 @@ class Project(Base):
 
     client_rel = relationship("Client", back_populates="projects")
     purchase_orders = relationship("PurchaseOrder", back_populates="project_rel")
+    work_orders = relationship("WorkOrder", back_populates="project_rel")
 
 
 class Product(Base):
@@ -475,6 +477,297 @@ class SystemLog(Base):
     status = Column(String(50), nullable=True, default="Success")
     user = Column(String(100), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class WorkOrder(Base):
+    __tablename__ = "work_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_name = Column(String(200), nullable=False, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
+    wo_number = Column(String(100), nullable=False, unique=True, index=True)
+    wo_date = Column(DateTime, nullable=True)
+    item = Column(String(300), nullable=True, default="")
+    uom = Column(String(50), nullable=False, default="Nos")
+    project = Column(String(300), nullable=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
+    total_quantity = Column(Float, nullable=False, default=0)
+    unit_price = Column(Float, nullable=False, default=0)
+    gst = Column(String(20), nullable=True, default="0")
+    freight = Column(Float, nullable=False, default=0)
+
+    work_description = Column(Text, nullable=True)
+    site_location = Column(String(200), nullable=True)
+    engineer_name = Column(String(150), nullable=True)
+    priority = Column(String(20), nullable=False, default="Medium")
+    start_date = Column(DateTime, nullable=True)
+    target_completion_date = Column(DateTime, nullable=True)
+    remarks = Column(Text, nullable=True)
+
+    status = Column(String(50), nullable=False, default="Pending", server_default="Pending")
+    closed_at = Column(DateTime, nullable=True)
+    closed_by = Column(String(100), nullable=True)
+    closed_remark = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+    last_opened_at = Column(DateTime, nullable=True)
+    last_opened_by = Column(String(100), nullable=True)
+    last_updated_at = Column(DateTime, nullable=True)
+    last_updated_by = Column(String(100), nullable=True)
+
+    client_rel = relationship("Client", back_populates="work_orders")
+    project_rel = relationship("Project", back_populates="work_orders")
+    line_items = relationship("WOLineItem", back_populates="work_order", cascade="all, delete-orphan", order_by="WOLineItem.id")
+    work_order_sales = relationship("WorkOrderSale", back_populates="work_order")
+
+    @property
+    def total_qty(self) -> float:
+        if self.line_items:
+            return sum(li.quantity for li in self.line_items)
+        return self.total_quantity  # type: ignore
+
+    @property
+    def completed_qty(self) -> float:
+        if self.line_items:
+            return sum(li.completed_quantity for li in self.line_items)
+        return 0.0
+
+    @property
+    def pending_quantity(self) -> float:
+        return round(max(0, self.total_qty - self.completed_qty), 10)
+
+    @property
+    def gst_rate(self) -> float:
+        if self.gst is None or str(self.gst).strip() in ("", "0"):
+            return 0.0
+        if str(self.gst).startswith("₹"):
+            return 0.0
+        cleaned = str(self.gst).replace("%", "").strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            return 0.0
+
+    @property
+    def subtotal(self) -> float:
+        if self.line_items:
+            return sum(li.quantity * li.unit_price for li in self.line_items)
+        return self.total_quantity * self.unit_price  # type: ignore
+
+    @property
+    def gst_amount(self) -> float:
+        if self.gst and str(self.gst).strip() not in ("", "0"):
+            if str(self.gst).startswith("₹"):
+                cleaned = str(self.gst).replace("₹", "").replace(",", "").strip()
+                try:
+                    return float(cleaned)
+                except ValueError:
+                    return 0.0
+            else:
+                return self.subtotal * self.gst_rate / 100
+        if self.line_items:
+            return sum(li.gst_amount for li in self.line_items)
+        return self.subtotal * self.gst_rate / 100
+
+    @property
+    def grand_total(self) -> float:
+        items_freight = sum(li.freight for li in self.line_items) if self.line_items else 0.0
+        return self.subtotal + self.gst_amount + self.freight + items_freight  # type: ignore
+
+    @property
+    def items_display(self) -> str:
+        if self.line_items:
+            return ", ".join(li.item for li in self.line_items)
+        return self.item or ""  # type: ignore
+
+
+class WOLineItem(Base):
+    __tablename__ = "wo_line_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    wo_id = Column(Integer, ForeignKey("work_orders.id"), nullable=False)
+    item = Column(String(300), nullable=False)
+    quantity = Column(Float, nullable=False, default=0)
+    completed_quantity = Column(Float, nullable=False, default=0)
+    uom = Column(String(50), nullable=False, default="Nos")
+    unit_price = Column(Float, nullable=False, default=0)
+    gst = Column(String(20), nullable=True, default="0")
+    freight = Column(Float, nullable=False, default=0)
+
+    @property
+    def subtotal(self) -> float:
+        return self.quantity * self.unit_price  # type: ignore
+
+    @property
+    def gst_rate(self) -> float:
+        if self.gst is None or str(self.gst).strip() in ("", "0"):
+            return 0.0
+        if str(self.gst).startswith("₹"):
+            return 0.0
+        cleaned = str(self.gst).replace("%", "").strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            return 0.0
+
+    @property
+    def gst_amount(self) -> float:
+        if self.gst and str(self.gst).startswith("₹"):
+            cleaned = str(self.gst).replace("₹", "").replace(",", "").strip()
+            try:
+                return float(cleaned)
+            except ValueError:
+                return 0.0
+        return self.subtotal * self.gst_rate / 100
+
+    @property
+    def grand_total(self) -> float:
+        return self.subtotal + self.gst_amount + self.freight  # type: ignore
+
+    work_order = relationship("WorkOrder", back_populates="line_items")
+
+
+class WorkOrderSale(Base):
+    __tablename__ = "work_order_sales"
+
+    id = Column(Integer, primary_key=True, index=True)
+    wo_id = Column(Integer, ForeignKey("work_orders.id"), nullable=False)
+    wo_number = Column(String(100), nullable=False, index=True)
+    invoice_number = Column(String(50), nullable=True, unique=True, index=True)
+    client_name = Column(String(200), nullable=False, index=True)
+    project = Column(String(300), nullable=True)
+
+    # Financials (Aggregate)
+    subtotal = Column(Numeric(12, 2), nullable=False, default=0)
+    gst_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    freight = Column(Numeric(12, 2), nullable=False, default=0)
+    grand_total = Column(Numeric(12, 2), nullable=False, default=0)
+
+    payment_status = Column(
+        Enum(PaymentStatus), default=PaymentStatus.PENDING, nullable=False
+    )
+    payment_note = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_by = Column(String(100), nullable=True)
+    invoice_url = Column(String(500), nullable=True)
+    e_way_bill_url = Column(String(500), nullable=True)
+    dispatch_from = Column(Text, nullable=True)
+    ship_to = Column(Text, nullable=True)
+    bill_to = Column(Text, nullable=True)
+    dispatched_through = Column(String(200), nullable=True)
+    e_way_bill_no = Column(String(100), nullable=True)
+    buyers_order_no = Column(String(100), nullable=True)
+    payment_terms = Column(String(200), nullable=True)
+    # Delivery tracking
+    delivery_status = Column(String(50), nullable=False, default="Not Delivered", server_default="Not Delivered")
+    delivery_challan_url = Column(String(500), nullable=True)
+    hsn_code = Column(String(50), nullable=True)
+
+    @property
+    def invoice_urls(self) -> List[str]:
+        return [url for url in (self.invoice_url or "").split(";") if url]
+
+    @property
+    def e_way_bill_urls(self) -> List[str]:
+        return [url for url in (self.e_way_bill_url or "").split(";") if url]
+
+    @property
+    def delivery_challan_urls(self) -> List[str]:
+        return [url for url in (self.delivery_challan_url or "").split(";") if url]
+
+    @property
+    def items_display(self) -> str:
+        if self.items:
+            return ", ".join(i.item for i in self.items)
+        return ""
+
+    work_order = relationship("WorkOrder", back_populates="work_order_sales")
+    items = relationship("WorkOrderSaleItem", back_populates="sale", cascade="all, delete-orphan")
+    activities = relationship(
+        "WorkOrderSaleActivity", back_populates="sale", cascade="all, delete-orphan"
+    )
+    dispatches = relationship(
+        "WorkOrderSaleDispatch", back_populates="sale", cascade="all, delete-orphan", order_by="WorkOrderSaleDispatch.dispatched_at"
+    )
+
+
+class WorkOrderSaleItem(Base):
+    __tablename__ = "work_order_sale_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sale_id = Column(Integer, ForeignKey("work_order_sales.id"), nullable=False)
+    line_item_id = Column(Integer, ForeignKey("wo_line_items.id"), nullable=True)
+
+    item = Column(String(300), nullable=False)
+    uom = Column(String(50), nullable=False, default="Nos")
+    quantity = Column(Float, nullable=False, default=0)
+    unit_price = Column(Numeric(12, 2), nullable=False, default=0)
+    gst_rate = Column(Float, nullable=False, default=0)
+
+    # Pre-calculated totals for this item
+    subtotal = Column(Numeric(12, 2), nullable=False, default=0)
+    gst_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    total_amount = Column(Numeric(12, 2), nullable=False, default=0)
+
+    sale = relationship("WorkOrderSale", back_populates="items")
+
+
+class WorkOrderSaleActivity(Base):
+    __tablename__ = "work_order_sale_activities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sale_id = Column(Integer, ForeignKey("work_order_sales.id"), nullable=False)
+    action = Column(String(200), nullable=False)
+    note = Column(Text, nullable=True)
+    payment_status = Column(String(50), nullable=True)
+    at = Column(DateTime, server_default=func.now())
+    by = Column(String(100), nullable=True)
+
+    sale = relationship("WorkOrderSale", back_populates="activities")
+
+
+class WorkOrderSaleDispatch(Base):
+    """One row per actual dispatch event against a WorkOrderSale/invoice — the
+    initial dispatch at sale creation, plus one more per subsequent 'Dispatch
+    More'. Mirrors SaleDispatch for Work Orders."""
+
+    __tablename__ = "work_order_sale_dispatches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sale_id = Column(Integer, ForeignKey("work_order_sales.id"), nullable=False)
+    dispatched_at = Column(DateTime, server_default=func.now())
+    quantity = Column(Float, nullable=False, default=0)
+    uom = Column(String(50), nullable=False, default="Nos")
+    subtotal = Column(Numeric(12, 2), nullable=False, default=0)
+    gst_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    amount = Column(Numeric(12, 2), nullable=False, default=0)
+    invoice_number = Column(String(50), nullable=True)
+    e_way_bill_no = Column(String(100), nullable=True)
+    by = Column(String(100), nullable=True)
+
+    sale = relationship("WorkOrderSale", back_populates="dispatches")
+    items = relationship("WorkOrderSaleDispatchItem", back_populates="dispatch", cascade="all, delete-orphan")
+
+
+class WorkOrderSaleDispatchItem(Base):
+    """Per-item breakdown of one WorkOrderSaleDispatch — mirrors
+    SaleDispatchItem for Work Orders."""
+
+    __tablename__ = "work_order_sale_dispatch_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    dispatch_id = Column(Integer, ForeignKey("work_order_sale_dispatches.id"), nullable=False)
+    item = Column(String(300), nullable=False)
+    uom = Column(String(50), nullable=False, default="Nos")
+    quantity = Column(Float, nullable=False, default=0)
+    subtotal = Column(Numeric(12, 2), nullable=False, default=0)
+    gst_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    amount = Column(Numeric(12, 2), nullable=False, default=0)
+
+    dispatch = relationship("WorkOrderSaleDispatch", back_populates="items")
 
 
 class UserSession(Base):

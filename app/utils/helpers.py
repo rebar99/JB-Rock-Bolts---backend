@@ -29,6 +29,24 @@ def generate_invoice_number(db: Session) -> str:
     return f"INV-{year}-{str(count + 1).zfill(4)}"
 
 
+def generate_wo_number(db: Session) -> str:
+    from app.models.models import WorkOrder
+    year = datetime.now().year
+    count = db.query(WorkOrder).filter(
+        WorkOrder.wo_number.like(f"WO-{year}-%")
+    ).count()
+    return f"WO-{year}-{str(count + 1).zfill(4)}"
+
+
+def generate_wo_invoice_number(db: Session) -> str:
+    from app.models.models import WorkOrderSale
+    year = datetime.now().year
+    count = db.query(WorkOrderSale).filter(
+        WorkOrderSale.invoice_number.like(f"WINV-{year}-%")
+    ).count()
+    return f"WINV-{year}-{str(count + 1).zfill(4)}"
+
+
 def compute_line_taxable_and_gst(quantity: float, unit_price: float, gst_rate: float) -> tuple:
     """Recompute Taxable Amount and GST Amount for a single dispatch line item,
     directly from the raw values entered by the user: quantity, unit price, and
@@ -102,6 +120,36 @@ def recalc_po_delivered_quantities(db: Session, po) -> None:
         li.delivered_quantity = round(max(0, float(by_id) + float(by_name)), 10)
         total_all += li.delivered_quantity
     po.delivered_quantity = round(max(0, total_all), 10)
+
+
+def recalc_wo_completed_quantities(db: Session, wo) -> None:
+    """Rebuild WorkOrder/WOLineItem completed_quantity from actual
+    WorkOrderSaleItem rows. Mirrors recalc_po_delivered_quantities exactly —
+    always recomputes from scratch (fresh SUM over WorkOrderSaleItem, the
+    source of truth for real dispatches) instead of accumulating with
+    +=/-=, so the stored value can never drift upward from duplicate/retried
+    calls — it is simply overwritten with whatever the Work Order Sales
+    table actually contains.
+    """
+    from sqlalchemy import func
+    from app.models.models import WorkOrderSale, WorkOrderSaleItem
+
+    if not wo.line_items:
+        return
+
+    wo_sale_ids = [s.id for s in wo.work_order_sales]
+    total_all = 0.0
+    for li in wo.line_items:
+        by_id = db.query(func.sum(WorkOrderSaleItem.quantity)).filter(WorkOrderSaleItem.line_item_id == li.id).scalar() or 0
+        by_name = 0.0
+        if wo_sale_ids:
+            by_name = db.query(func.sum(WorkOrderSaleItem.quantity)).filter(
+                WorkOrderSaleItem.sale_id.in_(wo_sale_ids),
+                WorkOrderSaleItem.line_item_id.is_(None),
+                WorkOrderSaleItem.item.ilike(li.item),
+            ).scalar() or 0
+        li.completed_quantity = round(max(0, float(by_id) + float(by_name)), 10)
+        total_all += li.completed_quantity
 
 
 def derive_inventory_status(quantity: int) -> str:
