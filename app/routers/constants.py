@@ -35,6 +35,9 @@ PAYMENT_TERMS = [
     "Against Delivery",
 ]
 
+WO_STATUSES = ["Pending", "In Progress", "Partial", "Completed", "Closed", "Cancelled"]
+WO_PRIORITIES = ["Low", "Medium", "High", "Urgent"]
+
 
 from sqlalchemy import text
 
@@ -109,4 +112,6 @@ def get_constants(db: Session = Depends(get_db)):
         "payment_statuses": ["Pending", "Partial", "Paid"],
         "delivery_statuses": ["Not Delivered", "Delivered"],
         "inventory_statuses": ["In Stock", "Low Stock", "Out of Stock"],
+        "wo_statuses": WO_STATUSES,
+        "wo_priorities": WO_PRIORITIES,
     }

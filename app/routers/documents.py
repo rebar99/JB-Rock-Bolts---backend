@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.models import PurchaseOrder, Sale
+from app.models.models import PurchaseOrder, Sale, WorkOrder, WorkOrderSale
 
 router = APIRouter(prefix="/api/documents", tags=["Documents"])
 
@@ -431,6 +431,232 @@ def get_po_document(po_id: int, db: Session = Depends(get_db)):
       Read and Accepted<br/><br/><br/><br/>
       <b>{SELLER['name']}</b><br/><br/>
       Authorised Signatory
+    </div>
+  </div>
+
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
+# ── Work Order Document ─────────────────────────────────────────────────────
+
+@router.get("/wo/{wo_id}", response_class=HTMLResponse)
+def get_wo_document(wo_id: int, db: Session = Depends(get_db)):
+    wo = db.get(WorkOrder, wo_id)
+    if not wo:
+        raise HTTPException(status_code=404, detail="Work order not found.")
+
+    subtotal = wo.subtotal
+    gst_amount = wo.gst_amount
+    freight = wo.freight
+    grand_total = wo.grand_total
+    words = _amount_words(grand_total)
+    items_freight = sum(li.freight for li in wo.line_items) if wo.line_items else freight
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Work Order – {wo.wo_number}</title>
+  <style>
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{font-family:'Segoe UI',Arial,sans-serif;font-size:12px;color:#111;
+          background:#fff;padding:28px 32px}}
+
+    .top-header{{
+      background:#2e7d32;color:#fff;text-align:center;
+      padding:10px 16px 8px;border-radius:4px 4px 0 0;
+    }}
+    .top-header .company-name{{font-size:18px;font-weight:700;letter-spacing:.5px;text-transform:uppercase}}
+    .top-header .company-addr{{font-size:11px;margin-top:3px;opacity:.92}}
+    .top-header .doc-title{{
+      font-size:14px;font-weight:700;letter-spacing:2px;text-transform:uppercase;
+      margin-top:6px;border-top:1px solid rgba(255,255,255,.4);padding-top:5px
+    }}
+
+    .wo-meta-bar{{
+      display:flex;justify-content:space-between;
+      border:1px solid #ccc;border-top:none;
+      padding:6px 12px;background:#f9f9f9;font-size:11.5px;
+    }}
+    .wo-meta-bar b{{color:#111}}
+
+    .address-grid{{
+      display:grid;grid-template-columns:1fr 1fr;
+      border:1px solid #ccc;border-top:none;
+    }}
+    .addr-cell{{padding:10px 14px;font-size:11.5px;line-height:1.6}}
+    .addr-cell:first-child{{border-right:1px solid #ccc}}
+    .addr-label{{font-weight:700;font-size:12px;text-decoration:underline;margin-bottom:4px}}
+    .addr-company{{font-weight:700;font-size:12.5px;margin-bottom:2px}}
+
+    .item-table{{width:100%;border-collapse:collapse;margin-top:0;font-size:11.5px}}
+    .item-table th{{
+      background:#2e7d32;color:#fff;
+      padding:6px 8px;text-align:center;
+      border:1px solid #ccc;font-weight:600;font-size:11px
+    }}
+    .item-table td{{
+      border:1px solid #ccc;padding:6px 8px;
+      vertical-align:top;text-align:center
+    }}
+    .item-table td.desc{{text-align:left}}
+    .item-table td.num{{text-align:right}}
+
+    .totals-wrap{{display:flex;justify-content:flex-end;border:1px solid #ccc;border-top:none}}
+    .totals-table{{border-collapse:collapse;min-width:340px;font-size:11.5px}}
+    .totals-table td{{padding:4px 10px;border:1px solid #ccc}}
+    .totals-table td.lbl{{font-weight:600;background:#f5f5f5}}
+    .totals-table td.val{{text-align:right;font-weight:600;min-width:120px}}
+    .totals-table tr.grand td{{background:#2e7d32;color:#fff;font-weight:700;font-size:13px}}
+
+    .words-bar{{
+      border:1px solid #ccc;border-top:none;
+      padding:6px 12px;font-size:11.5px;
+    }}
+    .words-bar b{{font-style:italic}}
+
+    .terms{{margin-top:14px;font-size:11px}}
+    .terms h4{{font-size:12px;margin-bottom:6px;text-decoration:underline;font-weight:700}}
+    .terms table{{width:100%;border-collapse:collapse}}
+    .terms td{{padding:3px 6px;vertical-align:top}}
+    .terms td:first-child{{font-weight:600;white-space:nowrap;width:170px;color:#2e7d32}}
+
+    .sig-footer{{
+      margin-top:32px;display:grid;grid-template-columns:1fr 1fr;
+      gap:24px;font-size:11px;
+    }}
+    .sig-block{{border-top:1px solid #999;padding-top:8px;text-align:center}}
+
+    @media print{{
+      body{{padding:12px 16px}}
+      @page{{size:A4;margin:10mm}}
+    }}
+  </style>
+</head>
+<body>
+
+  <div class="top-header">
+    <div class="company-name">M/S {wo.client_name.upper()}</div>
+    <div class="company-addr">
+      {wo.site_location or ''}{(' – ' + wo.project) if wo.project else ''}
+    </div>
+    <div class="doc-title">WORK ORDER</div>
+  </div>
+
+  <div class="wo-meta-bar">
+    <span><b>Work Order Number:</b> {wo.wo_number}</span>
+    <span><b>WO Date:</b> {_fmt_date(wo.wo_date or wo.created_at)}</span>
+  </div>
+
+  <div class="address-grid">
+    <div class="addr-cell">
+      <div class="addr-label">From,</div>
+      <div class="addr-company">{SELLER['name']}</div>
+      <div>{SELLER['address1']}</div>
+      <div>{SELLER['address2']}</div>
+    </div>
+    <div class="addr-cell">
+      <div class="addr-label">Client / Site:</div>
+      <div class="addr-company">M/s. {wo.client_name}</div>
+      {('<div>' + wo.project + '</div>') if wo.project else ''}
+      <div>{wo.site_location or '—'}</div>
+      {('<div><b>Engineer/Supervisor:</b> ' + wo.engineer_name + '</div>') if wo.engineer_name else ''}
+      <div><b>Priority:</b> {wo.priority or 'Medium'}</div>
+      {('<div><b>Start Date:</b> ' + _fmt_date(wo.start_date) + '</div>') if wo.start_date else ''}
+      {('<div><b>Target Completion:</b> ' + _fmt_date(wo.target_completion_date) + '</div>') if wo.target_completion_date else ''}
+      <div><b>Status:</b> {wo.status or 'Pending'}</div>
+    </div>
+  </div>
+
+  {f'''<div class="wo-meta-bar" style="display:block">
+    <b>Work Description:</b> {wo.work_description}
+  </div>''' if wo.work_description else ''}
+
+  <table class="item-table">
+    <thead>
+      <tr>
+        <th style="width:36px">Sr.<br/>No.</th>
+        <th>Item Description</th>
+        <th style="width:46px">UOM</th>
+        <th style="width:56px">Qty</th>
+        <th style="width:70px">Completed</th>
+        <th style="width:70px">Pending</th>
+        <th style="width:76px">Unit Price</th>
+        <th style="width:88px">Taxable<br/>Amount</th>
+        <th style="width:96px">Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {''.join(
+          f'''<tr>
+            <td>{i+1}</td>
+            <td class="desc"><b>{li.item}</b></td>
+            <td>{li.uom or 'Nos'}</td>
+            <td class="num">{_fmt_inr(li.quantity)}</td>
+            <td class="num">{_fmt_inr(li.completed_quantity)}</td>
+            <td class="num">{_fmt_inr(max(0, li.quantity - li.completed_quantity))}</td>
+            <td class="num">{_fmt_inr(li.unit_price)}</td>
+            <td class="num">{_fmt_inr(li.quantity * li.unit_price)}</td>
+            <td class="num">{_fmt_inr(li.quantity * li.unit_price)}</td>
+          </tr>'''
+          for i, li in enumerate(wo.line_items)
+      ) if wo.line_items else f'''<tr>
+        <td>1</td>
+        <td class="desc"><b>{wo.item}</b></td>
+        <td>{wo.uom or 'Nos'}</td>
+        <td class="num">{_fmt_inr(wo.total_quantity)}</td>
+        <td class="num">0.00</td>
+        <td class="num">{_fmt_inr(wo.total_quantity)}</td>
+        <td class="num">{_fmt_inr(wo.unit_price)}</td>
+        <td class="num">{_fmt_inr(subtotal)}</td>
+        <td class="num">{_fmt_inr(subtotal)}</td>
+      </tr>'''}
+      <tr><td colspan="9" style="height:22px"></td></tr>
+    </tbody>
+  </table>
+
+  <div class="totals-wrap">
+    <table class="totals-table">
+      <tr>
+        <td class="lbl">Total Taxable Amount</td>
+        <td class="val">{_fmt_inr(subtotal)}</td>
+      </tr>
+      <tr>
+        <td class="lbl">Add GST</td>
+        <td class="val">{_fmt_inr(gst_amount)}</td>
+      </tr>
+      <tr>
+        <td class="lbl">P &amp; F (Freight)</td>
+        <td class="val">{_fmt_inr(items_freight)}</td>
+      </tr>
+      <tr class="grand">
+        <td class="lbl">Grand Total</td>
+        <td class="val">{_fmt_inr(grand_total)}</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="words-bar">
+    <b>IN WORDS: {words}</b>
+  </div>
+
+  {f"""<div style="margin-top:14px;font-size:11px;">
+    <h4 style="font-size:12px;margin-bottom:6px;text-decoration:underline;font-weight:700">Remarks:</h4>
+    <div style="border:1px solid #ccc;padding:8px 12px;background:#f9f9f9;border-radius:4px;white-space:pre-wrap;">{wo.remarks}</div>
+  </div>""" if wo.remarks else ''}
+
+  <div class="sig-footer">
+    <div class="sig-block">
+      Issued By,<br/><br/><br/>
+      <b>{SELLER['name']}</b><br/><br/>
+      Authorised Signatory
+    </div>
+    <div class="sig-block">
+      Received &amp; Accepted<br/><br/><br/><br/>
+      <b>{wo.engineer_name or wo.client_name}</b><br/><br/>
+      Signature
     </div>
   </div>
 
@@ -878,6 +1104,445 @@ def get_invoice_document(sale_id: int, download: bool = False, db: Session = Dep
   </table>
 
   <!-- ══ DECLARATION + SIGNATURE ══════════════════════════════════ -->
+  <div class="bottom-grid">
+    <div class="decl-cell">
+      <b>Declaration:</b><br/>
+      We declare that this invoice shows the actual price of the goods described
+      and that all particulars are true and correct. Tax is payable on Reverse
+      Charge: <b>No</b>.
+    </div>
+    <div class="sign-cell">
+      <div>for <span class="company">{SELLER['name']}</span></div>
+      <div>
+        <div class="sig-line">Authorised Signatory</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer-note">This is a Computer Generated Invoice</div>
+
+</body>
+</html>"""
+    if download:
+        inv_no_safe = (sale.invoice_number or "DRAFT").replace("/", "-").replace("\\", "-")
+        filename = f"Invoice-{inv_no_safe}-{sale.client_name.replace(' ', '_')}.html"
+        from fastapi.responses import Response
+        return Response(
+            content=html,
+            media_type="text/html",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    return HTMLResponse(content=html)
+
+
+# ── Work Order Sale Invoice (Tax Invoice format, mirrors Sale invoice) ────────
+
+@router.get("/wo-invoice/{sale_id}", response_class=HTMLResponse)
+def get_wo_invoice_document(sale_id: int, download: bool = False, db: Session = Depends(get_db)):
+    sale = db.get(WorkOrderSale, sale_id)
+    if not sale:
+        raise HTTPException(status_code=404, detail="Work order sale not found.")
+
+    wo = db.get(WorkOrder, sale.wo_id) if sale.wo_id else None
+
+    subtotal = sale.subtotal
+    gst_amount = sale.gst_amount
+    freight = sale.freight
+    grand_total = sale.grand_total
+
+    total_completed = wo.completed_qty if wo else 0
+    pending_qty      = wo.pending_quantity if wo else 0
+    words            = _amount_words(grand_total)
+
+    is_intra_state = False
+
+    gst_rate = sale.items[0].gst_rate if sale.items else 18.0
+    if is_intra_state:
+        igst_rate = 0.0
+        igst_amt = 0.0
+        cgst_rate = gst_rate / 2
+        sgst_rate = gst_rate / 2
+        cgst_amt = sale.gst_amount / 2
+        sgst_amt = sale.gst_amount / 2
+    else:
+        igst_rate = gst_rate
+        igst_amt = sale.gst_amount
+        cgst_rate = 0.0
+        cgst_amt = 0.0
+        sgst_rate = 0.0
+        sgst_amt = 0.0
+
+    inv_no = sale.invoice_number or "DRAFT"
+    inv_date = _fmt_date(sale.created_at)
+    wo_date = _fmt_date(wo.wo_date or wo.created_at) if wo else "—"
+    deliv_date = _fmt_date(sale.updated_at)
+    pay_terms = (sale.payment_terms if sale.payment_terms else
+                 sale.payment_note or "As per discussion")
+    location = sale.ship_to or (wo.site_location if wo else "—")
+    project = sale.project or "—"
+    ship_to_addr = sale.ship_to or location
+    bill_to_addr = sale.bill_to or sale.client_name
+    dispatched_via = sale.dispatched_through or "—"
+    buyer_order = sale.buyers_order_no or sale.wo_number
+    hsn_sac = sale.hsn_code or "—"
+
+    import hashlib
+    irn_seed = f"{inv_no}{sale.client_name}{sale.grand_total}"
+    irn_hash = hashlib.sha256(irn_seed.encode()).hexdigest()
+    irn = f"{irn_hash[:32]}-{irn_hash[32:48]}"
+    ack_no = str(abs(hash(irn_seed)))[:15]
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Tax Invoice – {inv_no}</title>
+  <style>
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{font-family:'Segoe UI',Arial,sans-serif;font-size:11.5px;color:#111;
+          background:#fff;padding:24px 32px;max-width:900px;margin:0 auto}}
+
+    .page-header{{
+      display:grid;grid-template-columns:80px 1fr 120px;
+      align-items:center;margin-bottom:6px;
+    }}
+    .deco-lines span{{
+      display:block;height:3px;background:#333;margin-bottom:4px;
+    }}
+    .deco-lines span:first-child{{width:40px}}
+    .deco-lines span:last-child{{width:28px}}
+    .page-title{{text-align:center;font-size:17px;font-weight:700;letter-spacing:.5px}}
+    .e-inv-box{{text-align:right;font-size:10px;font-weight:600;color:#444}}
+    .qr-placeholder{{
+      width:76px;height:76px;border:1px solid #999;
+      display:flex;align-items:center;justify-content:center;
+      font-size:8px;color:#888;margin-left:auto;margin-top:3px;
+    }}
+
+    .irn-bar{{font-size:10.5px;margin-bottom:8px;line-height:1.8}}
+    .irn-bar .row{{display:flex;gap:6px}}
+    .irn-bar .lbl{{font-weight:600;min-width:70px}}
+
+    .main-grid{{display:grid;grid-template-columns:1fr 1fr;border:1px solid #555}}
+
+    .seller-cell{{padding:10px 12px;font-size:11px;line-height:1.75;border-right:1px solid #555}}
+    .seller-name{{font-weight:700;font-size:12px}}
+
+    .inv-details{{font-size:10.5px}}
+    .inv-details table{{width:100%;border-collapse:collapse;height:100%}}
+    .inv-details td{{
+      border:1px solid #555;padding:3px 7px;vertical-align:top;line-height:1.6
+    }}
+    .inv-details td.lbl{{font-weight:600;color:#222;background:#f7f7f7;white-space:nowrap}}
+    .inv-details td.val{{font-weight:600}}
+    .inv-details td.date-lbl{{font-weight:600;font-size:10px;color:#555}}
+
+    .party-grid{{
+      display:grid;grid-template-columns:1fr 1fr;
+      border:1px solid #555;border-top:none;
+    }}
+    .party-cell{{padding:8px 12px;font-size:11px;line-height:1.75}}
+    .party-cell:first-child{{border-right:1px solid #555}}
+    .party-type{{font-weight:700;font-size:10.5px;text-decoration:underline;
+                 margin-bottom:3px;color:#333}}
+    .party-name{{font-weight:700;font-size:12px}}
+
+    .item-table{{
+      width:100%;border-collapse:collapse;
+      border:1px solid #555;border-top:none;
+      font-size:11px;
+    }}
+    .item-table th{{
+      border:1px solid #555;padding:5px 7px;
+      text-align:center;font-weight:700;font-size:10.5px;
+      background:#f0f0f0;
+    }}
+    .item-table td{{
+      border:1px solid #555;padding:5px 7px;
+      vertical-align:top;
+    }}
+    .item-table td.num{{text-align:right}}
+    .item-table td.ctr{{text-align:center}}
+
+    .totals-section{{
+      display:grid;grid-template-columns:1fr auto;
+      border:1px solid #555;border-top:none;
+    }}
+    .words-cell{{
+      padding:8px 12px;font-size:11px;line-height:1.6;
+      border-right:1px solid #555;
+    }}
+    .totals-cell{{min-width:280px}}
+    .totals-cell table{{width:100%;border-collapse:collapse}}
+    .totals-cell td{{
+      border:1px solid #555;padding:4px 10px;font-size:11px;
+    }}
+    .totals-cell td.lbl{{font-weight:600;background:#f7f7f7;width:160px}}
+    .totals-cell td.val{{text-align:right;font-weight:600}}
+    .totals-cell tr.grand td{{
+      font-weight:700;font-size:12px;background:#1a1a2e;color:#fff;
+    }}
+
+    .gst-table{{
+      width:100%;border-collapse:collapse;
+      border:1px solid #555;border-top:none;
+      font-size:10.5px;
+    }}
+    .gst-table th{{
+      border:1px solid #555;padding:4px 7px;
+      background:#f0f0f0;font-weight:700;text-align:center;
+    }}
+    .gst-table td{{border:1px solid #555;padding:4px 7px;text-align:center}}
+    .gst-table td.num{{text-align:right}}
+
+    .bottom-grid{{
+      display:grid;grid-template-columns:1fr 1fr;
+      border:1px solid #555;border-top:none;min-height:80px;
+    }}
+    .decl-cell{{
+      padding:8px 12px;font-size:10.5px;line-height:1.7;
+      border-right:1px solid #555;
+    }}
+    .sign-cell{{
+      padding:8px 12px;font-size:10.5px;text-align:right;
+      display:flex;flex-direction:column;justify-content:space-between;
+    }}
+    .sign-cell .company{{font-weight:700;font-size:11px}}
+    .sign-cell .sig-line{{
+      border-top:1px solid #555;width:160px;
+      margin-left:auto;padding-top:4px;font-size:10px;
+    }}
+
+    .footer-note{{
+      text-align:center;font-size:10.5px;color:#555;
+      margin-top:8px;font-style:italic;
+    }}
+
+    @media print{{
+      body{{padding:8px 12px}}
+      @page{{size:A4;margin:8mm}}
+    }}
+  </style>
+</head>
+<body>
+
+  <div class="page-header">
+    <div class="deco-lines">
+      <span></span>
+      <span></span>
+    </div>
+    <div class="page-title">Tax Invoice</div>
+    <div class="e-inv-box">
+      e-Invoice
+      <div class="qr-placeholder">QR Code</div>
+    </div>
+  </div>
+
+  <div class="irn-bar">
+    <div class="row"><span class="lbl">IRN</span><span>: {irn}</span></div>
+    <div class="row"><span class="lbl">Ack No.</span><span>: {ack_no}</span></div>
+    <div class="row"><span class="lbl">Ack Date</span><span>: {inv_date}</span></div>
+  </div>
+
+  <div class="main-grid">
+
+    <div class="seller-cell">
+      <div class="seller-name">{SELLER['name']} (FY{_fy_label(sale.created_at)})</div>
+      <div>Regd. Office: {SELLER['address1']},</div>
+      <div>{SELLER['address2']} India</div>
+      <div>PLANT ADD.: VPO PALAKWAHA, TEHSIL HAROLI,</div>
+      <div>Una, 177220</div>
+      <div>IEC CODE NO.: 2216900613</div>
+      <div>E-Mail: {SELLER['email']}</div>
+    </div>
+
+    <div class="inv-details">
+      <table>
+        <tr>
+          <td class="lbl">Invoice No.</td>
+          <td class="val">{inv_no}</td>
+          <td class="lbl">e-Way Bill No.</td>
+          <td class="val">{sale.e_way_bill_no or '—'}</td>
+        </tr>
+        <tr>
+          <td class="lbl">Delivery Note</td>
+          <td>—</td>
+          <td class="date-lbl">Dated</td>
+          <td class="val">{inv_date}</td>
+        </tr>
+        <tr>
+          <td class="lbl">Reference No. &amp; Date.</td>
+          <td colspan="3">—</td>
+        </tr>
+        <tr>
+          <td class="lbl">Mode/Terms of Payment</td>
+          <td colspan="3">{pay_terms}</td>
+        </tr>
+        <tr>
+          <td class="lbl">Buyer's Order No.</td>
+          <td class="val">{buyer_order}</td>
+          <td class="date-lbl">Dated</td>
+          <td class="val">{wo_date}</td>
+        </tr>
+        <tr>
+          <td class="lbl">Dispatch Doc No.</td>
+          <td>—</td>
+          <td class="date-lbl">Delivery Note Date</td>
+          <td class="val">{deliv_date}</td>
+        </tr>
+        <tr>
+          <td class="lbl">Dispatched through</td>
+          <td colspan="3">{dispatched_via}</td>
+        </tr>
+        <tr>
+          <td class="lbl">Destination</td>
+          <td colspan="3">{location}</td>
+        </tr>
+        <tr>
+          <td class="lbl">Terms of Delivery</td>
+          <td colspan="3">{project}</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="party-grid">
+    <div class="party-cell">
+      <div class="party-type">Consignee (Ship to)</div>
+      <div class="party-name">{sale.client_name}</div>
+      <div style="white-space:pre-line">{ship_to_addr}</div>
+    </div>
+    <div class="party-cell">
+      <div class="party-type">Buyer (Bill to)</div>
+      <div class="party-name">{sale.client_name}</div>
+      <div style="white-space:pre-line">{bill_to_addr}</div>
+    </div>
+  </div>
+
+  <table class="item-table">
+    <thead>
+      <tr>
+        <th style="width:30px">Sl<br/>No.</th>
+        <th>Description of Goods</th>
+        <th style="width:70px">HSN/SAC</th>
+        <th style="width:90px">Quantity</th>
+        <th style="width:80px">Rate</th>
+        <th style="width:46px">per</th>
+        <th style="width:52px">Disc.&nbsp;%</th>
+        <th style="width:100px">Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {''.join(
+          f'''<tr>
+            <td class="ctr">{i+1}</td>
+            <td>
+              <b>{it.item}</b>
+              {('<br/><span style="font-size:10px;color:#555">' + sale.project + '</span>') if sale.project and i == 0 else ''}
+            </td>
+            <td class="ctr">{hsn_sac}</td>
+            <td class="num">{_fmt_inr(it.quantity)}&nbsp;{it.uom or 'Nos'}</td>
+            <td class="num">{_fmt_inr(it.unit_price)}</td>
+            <td class="ctr">{it.uom or 'Nos'}</td>
+            <td class="ctr">—</td>
+            <td class="num">{_fmt_inr(it.subtotal)}</td>
+          </tr>'''
+          for i, it in enumerate(sale.items)
+      )}
+      {''.join('<tr>' + '<td style="height:20px"></td>'*8 + '</tr>' for _ in range(7))}
+    </tbody>
+  </table>
+
+  <div class="totals-section">
+
+    <div class="words-cell">
+      <div style="font-weight:700;margin-bottom:4px">Amount Chargeable (in words)</div>
+      <div style="font-style:italic">INR {words}</div>
+      {('<div style="margin-top:8px;font-size:10.5px"><b>Payment Note:</b> ' + sale.payment_note + '</div>') if sale.payment_note else ''}
+      <div style="margin-top:12px;font-size:10px;color:#666">
+        Total Completed (WO): {_fmt_inr(total_completed)} &nbsp;|&nbsp;
+        Balance Pending (WO): {_fmt_inr(pending_qty)}
+      </div>
+    </div>
+
+    <div class="totals-cell">
+      <table>
+        <tr>
+          <td class="lbl">Taxable Value</td>
+          <td class="val">{_fmt_inr(sale.subtotal)}</td>
+        </tr>
+        <tr>
+          <td class="lbl">IGST @ {igst_rate}%</td>
+          <td class="val">{_fmt_inr(igst_amt) if igst_amt else '—'}</td>
+        </tr>
+        <tr>
+          <td class="lbl">CGST @ {cgst_rate}%</td>
+          <td class="val">{_fmt_inr(cgst_amt) if cgst_amt else '—'}</td>
+        </tr>
+        <tr>
+          <td class="lbl">SGST @ {sgst_rate}%</td>
+          <td class="val">{_fmt_inr(sgst_amt) if sgst_amt else '—'}</td>
+        </tr>
+        <tr>
+          <td class="lbl">Freight / P&amp;F</td>
+          <td class="val">{_fmt_inr(sale.freight)}</td>
+        </tr>
+        <tr>
+          <td class="lbl">Round Off</td>
+          <td class="val">—</td>
+        </tr>
+        <tr class="grand">
+          <td class="lbl">Grand Total</td>
+          <td class="val">₹&nbsp;{_fmt_inr(sale.grand_total)}</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <table class="gst-table">
+    <thead>
+      <tr>
+        <th>HSN/SAC</th>
+        <th>Taxable Value</th>
+        <th colspan="2">IGST</th>
+        <th colspan="2">CGST</th>
+        <th colspan="2">SGST/UTGST</th>
+        <th>Total Tax Amount</th>
+      </tr>
+      <tr>
+        <th></th><th></th>
+        <th>Rate</th><th>Amount</th>
+        <th>Rate</th><th>Amount</th>
+        <th>Rate</th><th>Amount</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="ctr">{hsn_sac}</td>
+        <td class="num">{_fmt_inr(sale.subtotal)}</td>
+        <td class="ctr">{f"{igst_rate}%" if igst_rate else "—"}</td>
+        <td class="num">{_fmt_inr(igst_amt) if igst_amt else "—"}</td>
+        <td class="ctr">{f"{cgst_rate}%" if cgst_rate else "—"}</td>
+        <td class="num">{_fmt_inr(cgst_amt) if cgst_amt else "—"}</td>
+        <td class="ctr">{f"{sgst_rate}%" if sgst_rate else "—"}</td>
+        <td class="num">{_fmt_inr(sgst_amt) if sgst_amt else "—"}</td>
+        <td class="num">{_fmt_inr(sale.gst_amount)}</td>
+      </tr>
+      <tr style="font-weight:700;background:#f7f7f7">
+        <td>Total</td>
+        <td class="num">{_fmt_inr(sale.subtotal)}</td>
+        <td></td>
+        <td class="num">{_fmt_inr(igst_amt) if igst_amt else "—"}</td>
+        <td></td>
+        <td class="num">{_fmt_inr(cgst_amt) if cgst_amt else "—"}</td>
+        <td></td>
+        <td class="num">{_fmt_inr(sgst_amt) if sgst_amt else "—"}</td>
+        <td class="num">{_fmt_inr(sale.gst_amount)}</td>
+      </tr>
+    </tbody>
+  </table>
+
   <div class="bottom-grid">
     <div class="decl-cell">
       <b>Declaration:</b><br/>

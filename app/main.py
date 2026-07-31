@@ -22,6 +22,9 @@ from app.routers import constants
 from app.routers import documents
 from app.routers import projects
 from app.routers import logs
+from app.routers import work_orders
+from app.routers import work_order_reports
+from app.routers import work_order_sales
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -262,6 +265,9 @@ app.include_router(users.router)
 app.include_router(documents.router)
 app.include_router(projects.router)
 app.include_router(logs.router)
+app.include_router(work_orders.router)
+app.include_router(work_order_reports.router)
+app.include_router(work_order_sales.router)
 
 
 @app.get("/", tags=["Health"])
