@@ -335,7 +335,7 @@ def get_po_fulfillment_summary(po_id: int, db: Session = Depends(get_db)):
 
         for d in s.dispatches:
             event_date = d.dispatched_at or datetime.min
-            event_invoice = d.invoice_number or s.invoice_number
+            event_invoice = s.invoice_number  # Always use sale's invoice_number for consistency
             event_had_visible_row = False
 
             if d.items:
