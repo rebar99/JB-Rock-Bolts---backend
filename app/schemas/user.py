@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
 from app.schemas.base import UTCDatetime, OptUTCDatetime
@@ -6,13 +6,13 @@ from app.schemas.base import UTCDatetime, OptUTCDatetime
 
 class UserCreate(BaseModel):
     name: str
-    email: EmailStr
+    email: str  # Change EmailStr to str
     password: str
 
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None  # Change Optional[EmailStr] to Optional[str]
     password: Optional[str] = None
 
 
@@ -28,7 +28,7 @@ class UserOut(BaseModel):
 
 
 class UserLogin(BaseModel):
-    email: EmailStr
+    email: str  # Change EmailStr to str
     password: str
 
 
