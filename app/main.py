@@ -26,6 +26,7 @@ from app.routers import work_orders
 from app.routers import work_order_reports
 from app.routers import work_order_sales
 from app.routers import item_master
+from app.routers import uom
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -292,6 +293,7 @@ app.include_router(work_orders.router)
 app.include_router(work_order_reports.router)
 app.include_router(work_order_sales.router)
 app.include_router(item_master.router)
+app.include_router(uom.router)
 
 
 @app.get("/", tags=["Health"])
