@@ -69,6 +69,31 @@ class ItemMasterSize(Base):
     item = relationship("ItemMasterItem", back_populates="sizes")
 
 
+class WOItemMasterItem(Base):
+    __tablename__ = "wo_item_master"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(300), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    updated_by = Column(String(100), nullable=True)
+
+    sizes = relationship("WOItemMasterSize", back_populates="item", cascade="all, delete-orphan", order_by="WOItemMasterSize.id")
+
+
+class WOItemMasterSize(Base):
+    __tablename__ = "wo_item_master_sizes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    item_id = Column(Integer, ForeignKey("wo_item_master.id"), nullable=False)
+    size = Column(String(50), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+
+    item = relationship("WOItemMasterItem", back_populates="sizes")
+
+
 class Client(Base):
     __tablename__ = "clients"
 
