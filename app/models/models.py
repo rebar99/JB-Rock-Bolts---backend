@@ -94,6 +94,17 @@ class WOItemMasterSize(Base):
     item = relationship("WOItemMasterItem", back_populates="sizes")
 
 
+class UOMOption(Base):
+    __tablename__ = "uom_options"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    updated_by = Column(String(100), nullable=True)
+
+
 class Client(Base):
     __tablename__ = "clients"
 

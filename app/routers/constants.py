@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.models import Client, Project, WorkOrder
+from app.database import get_db
+from app.models.models import Client, Project, WorkOrder, UOMOption
 from app.utils.helpers import normalize_client_name, normalize_project_name, dedupe_names_by_normalized_key
 
 router = APIRouter(prefix="/api/constants", tags=["Constants"])
@@ -116,9 +117,19 @@ def get_constants(db: Session = Depends(get_db)):
     wo_client_rows = db.query(WorkOrder.client_name).all()
     wo_clients = dedupe_names_by_normalized_key([c[0] for c in wo_client_rows], normalize_client_name)
 
+    # UOM Options
+    db_uom = db.query(UOMOption.name).order_by(UOMOption.name).all()
+    if db_uom:
+        uom_options = [u[0] for u in db_uom]
+    else:
+        for u in UOM_OPTIONS:
+            db.add(UOMOption(name=u))
+        db.commit()
+        uom_options = UOM_OPTIONS
+
     return {
         "products": PRODUCTS,
-        "uom_options": UOM_OPTIONS,
+        "uom_options": uom_options,
         "locations": LOCATIONS,
         "projects": all_projects,
         "payment_terms": PAYMENT_TERMS,
