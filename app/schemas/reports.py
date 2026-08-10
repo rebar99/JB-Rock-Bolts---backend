@@ -61,6 +61,7 @@ class PendingPORow(BaseModel):
     po_number: str
     client_name: str
     project: str
+    invoice_number: Optional[str] = None
     item: str
     subtotal: float
     gst_amount: float

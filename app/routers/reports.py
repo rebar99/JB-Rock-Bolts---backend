@@ -386,11 +386,20 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
         # Report/Dashboard — never the stored Sale.subtotal/gst_amount/
         # grand_total columns, which are only a snapshot from sale creation.
         delivered_sub = delivered_gst_amt = delivered_payment = 0.0
+        invoice_numbers = set()
         for s in o.sales:
+            if s.invoice_number:
+                invoice_numbers.add(s.invoice_number.strip())
+            for d in s.dispatches:
+                if d.invoice_number:
+                    invoice_numbers.add(d.invoice_number.strip())
+                    
             s_taxable, s_gst = compute_sale_taxable_and_gst(s.items)
             delivered_sub += s_taxable
             delivered_gst_amt += s_gst
             delivered_payment += compute_sale_grand_total(s_taxable, s_gst, float(s.freight or 0))
+            
+        invoice_str = ", ".join(sorted(invoice_numbers)) if invoice_numbers else "—"
 
         p_sub = max(0, t_sub - delivered_sub)
         p_gst = max(0, t_gst - delivered_gst_amt)
@@ -411,6 +420,7 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
             po_number=o.po_number,
             client_name=o.client_name,
             project=o.project or "—",
+            invoice_number=invoice_str,
             item=o.items_display,
             subtotal=round(t_sub, 2),
             gst_amount=round(t_gst, 2),
