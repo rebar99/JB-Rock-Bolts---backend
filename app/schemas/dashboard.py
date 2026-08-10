@@ -36,3 +36,4 @@ class RecentSale(BaseModel):
     delivery_status: str
     date: str
     invoice_number: Optional[str] = None
+    po_number: Optional[str] = None

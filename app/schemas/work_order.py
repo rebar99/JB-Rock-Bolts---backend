@@ -75,6 +75,7 @@ class WorkOrderBase(BaseModel):
     target_completion_date: Optional[datetime] = None
     remarks: Optional[str] = None
     status: Optional[str] = "Pending"
+    file_url: Optional[str] = None
 
 class WorkOrderCreate(WorkOrderBase):
     created_by: Optional[str] = None
@@ -96,6 +97,7 @@ class WorkOrderUpdate(BaseModel):
     target_completion_date: Optional[datetime] = None
     remarks: Optional[str] = None
     status: Optional[str] = None
+    file_url: Optional[str] = None
     last_updated_by: Optional[str] = None
     line_items: Optional[List[WOLineItemCreate]] = None
 
@@ -116,6 +118,11 @@ class WorkOrderOut(WorkOrderBase):
     closed_at: Optional[datetime] = None
     closed_by: Optional[str] = None
     closed_remark: Optional[str] = None
+    # True only on the response to PUT /{wo_id} when nothing actually
+    # differed from what was already stored — lets the frontend show "No
+    # changes to save" instead of a misleading "Updated" toast. Always
+    # False on every other response (GET, POST, etc).
+    no_changes: bool = False
 
     @computed_field
     @property

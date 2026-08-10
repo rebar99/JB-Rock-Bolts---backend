@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Query
 from sqlalchemy.orm import Session, joinedload
 from typing import Optional
 from datetime import datetime
@@ -7,7 +7,7 @@ from app.models.models import WorkOrder, WorkOrderSale
 from app.schemas.work_order_reports import (
     WorkOrderReportRow, WorkOrderReportOut, WorkOrderSaleReportRow, WorkOrderSaleReportOut,
 )
-from app.routers.upload_helpers import make_excel_response, style_header_row
+from app.routers.upload_helpers import make_excel_response, style_header_row, read_upload_bytes
 from app.utils.helpers import compute_sale_taxable_and_gst, compute_sale_grand_total
 
 router = APIRouter(prefix="/api/work-order-reports", tags=["Work Order Reports"])
@@ -145,6 +145,74 @@ def get_work_order_sales_report(
     )
 
 
+# ── Combined multi-sheet export ───────────────────────────────────────────────
+
+@router.get("/export-combined")
+def export_combined_work_order_report(
+    sheets: str = Query("completed,sales,pending", description="Comma-separated: completed, sales, pending"),
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
+    client: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Export one or more Work Order report sections into a single Excel workbook (one sheet per section)."""
+    from openpyxl import Workbook
+
+    requested = [s.strip() for s in sheets.split(",") if s.strip()]
+    if not requested:
+        raise HTTPException(status_code=400, detail="No sheet types specified")
+
+    wb = Workbook()
+    wb.remove(wb.active)  # drop the default empty sheet
+
+    if "completed" in requested:
+        ws = wb.create_sheet("Completed WO Report")
+        headers = ["Date", "Client Name", "Project", "WO Number", "Items",
+                   "WO Quantity", "Completed Quantity", "UOM"]
+        ws.append(headers)
+        style_header_row(ws, len(headers))
+        data = get_work_order_report(from_date=from_date, to_date=to_date, client=client, project=None, status=None, db=db)
+        for r in data.rows:
+            if r.pending_quantity > 0.0001:
+                continue
+            ws.append([r.wo_date, r.client_name, r.project, r.wo_number, r.item,
+                       r.total_quantity, r.completed_quantity, r.uom])
+
+    if "sales" in requested:
+        ws = wb.create_sheet("Sales Report")
+        headers = ["Date", "Invoice Number", "WO Number", "Client Name",
+                   "Subtotal", "GST Amount", "Grand Total", "Payment Status"]
+        ws.append(headers)
+        style_header_row(ws, len(headers))
+        data = get_work_order_sales_report(from_date=from_date, to_date=to_date, client=client, db=db)
+        for r in data.rows:
+            ws.append([r.date, r.invoice_number or "—", r.wo_number or "—", r.client_name,
+                       r.subtotal, r.gst_amount, r.grand_total, r.payment_status])
+        ws.append([])
+        ws.append(["", "", "", "Total Revenue:", data.total_revenue])
+        ws.append(["", "", "", "Record Count:", data.record_count])
+        ws.append(["", "", "", "Avg Order Value:", data.avg_order_value])
+
+    if "pending" in requested:
+        ws = wb.create_sheet("Pending WOs Report")
+        headers = ["WO Date", "WO Number", "Client Name", "Project", "Item",
+                   "Total Qty", "Completed Qty", "Pending Qty", "UOM", "Status"]
+        ws.append(headers)
+        style_header_row(ws, len(headers))
+        data = get_work_order_report(from_date=from_date, to_date=to_date, client=client, project=None, status=None, db=db)
+        for r in data.rows:
+            if r.pending_quantity <= 0.0001:
+                continue
+            ws.append([r.wo_date, r.wo_number, r.client_name, r.project, r.item,
+                       r.total_quantity, r.completed_quantity, r.pending_quantity, r.uom, r.status])
+
+    if not wb.sheetnames:
+        raise HTTPException(status_code=400, detail="No valid sheet types in request")
+
+    sheet_tag = "-".join(s[:4] for s in requested)
+    return make_excel_response(wb, f"work-order-reports-combined-{sheet_tag}.xlsx")
+
+
 @router.get("/export")
 def export_work_order_report(
     from_date: Optional[datetime] = None,
@@ -180,3 +248,82 @@ def export_work_order_report(
         ])
 
     return make_excel_response(wb, "work-order-report-export.xlsx")
+
+
+# ── Combined multi-sheet import (backup restore) ──────────────────────────────
+
+@router.post("/import-combined")
+async def import_combined_work_order_report(
+    file: UploadFile = File(...),
+    on_conflict: str = Query("skip", description="skip | update"),
+    created_by: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Import a combined Work Order backup Excel file.
+
+    Detects sheets by name and routes each to the appropriate importer:
+      "Work Orders"       → Work Orders module
+      "Work Order Sales"  → Work Order Sales module
+    """
+    from openpyxl import load_workbook
+    from io import BytesIO
+    from openpyxl import Workbook as _WB
+    from app.routers.work_orders import import_work_orders
+    from app.routers.work_order_sales import import_work_order_sales
+
+    content = await read_upload_bytes(file)
+    try:
+        wb = load_workbook(BytesIO(content), data_only=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Cannot read Excel file: {exc}")
+
+    SHEET_ROUTES = {
+        "Work Orders": "work-orders",
+        "Work Order Sales": "work-order-sales",
+        "Completed WO Report": "work-orders",
+        "Pending WOs Report": "work-orders",
+        "Sales Report": "work-order-sales",
+    }
+
+    class _FakeUpload:
+        def __init__(self, data: bytes, name: str):
+            self._data = data
+            self.filename = name
+
+        async def read(self) -> bytes:
+            return self._data
+
+    found = [s for s in wb.sheetnames if s in SHEET_ROUTES]
+    if not found:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"No recognizable sheets found. Got: {wb.sheetnames}. "
+                    f"Expected one or more of: {list(SHEET_ROUTES.keys())}"),
+        )
+
+    results: dict = {}
+    for sheet_name in found:
+        # Re-package just this sheet into its own mini workbook
+        mini_wb = _WB()
+        mini_ws = mini_wb.active
+        mini_ws.title = sheet_name
+        for row in wb[sheet_name].iter_rows(values_only=True):
+            mini_ws.append(list(row))
+        buf = BytesIO()
+        mini_wb.save(buf)
+
+        fake = _FakeUpload(buf.getvalue(), f"{sheet_name}.xlsx")
+        if SHEET_ROUTES[sheet_name] == "work-order-sales":
+            result = await import_work_order_sales(file=fake, on_conflict=on_conflict, created_by=created_by, db=db)
+        else:
+            result = await import_work_orders(file=fake, on_conflict=on_conflict, created_by=created_by, db=db)
+        results[sheet_name] = result
+
+    all_errors = [f"[{sn}] {e}" for sn, r in results.items() for e in (r.get("errors") or [])]
+    return {
+        "sheets": results,
+        "created": sum(r.get("created", 0) for r in results.values()),
+        "updated": sum(r.get("updated", 0) for r in results.values()),
+        "skipped": sum(r.get("skipped", 0) for r in results.values()),
+        "errors": all_errors,
+    }

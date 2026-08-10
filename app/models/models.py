@@ -43,6 +43,31 @@ class User(Base):
         return self.email.strip().lower() == settings.ADMIN_EMAIL.strip().lower()
 
 
+class ItemMasterItem(Base):
+    __tablename__ = "item_master"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(300), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    updated_by = Column(String(100), nullable=True)
+
+    sizes = relationship("ItemMasterSize", back_populates="item", cascade="all, delete-orphan", order_by="ItemMasterSize.id")
+
+
+class ItemMasterSize(Base):
+    __tablename__ = "item_master_sizes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    item_id = Column(Integer, ForeignKey("item_master.id"), nullable=False)
+    size = Column(String(50), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+
+    item = relationship("ItemMasterItem", back_populates="sizes")
+
+
 class Client(Base):
     __tablename__ = "clients"
 
@@ -495,6 +520,7 @@ class WorkOrder(Base):
     unit_price = Column(Float, nullable=False, default=0)
     gst = Column(String(20), nullable=True, default="0")
     freight = Column(Float, nullable=False, default=0)
+    file_url = Column(String(500), nullable=True)
 
     work_description = Column(Text, nullable=True)
     site_location = Column(String(200), nullable=True)

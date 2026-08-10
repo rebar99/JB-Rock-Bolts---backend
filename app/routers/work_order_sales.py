@@ -18,6 +18,7 @@ from app.schemas.work_order_sale import (
     WorkOrderSaleCreate, WorkOrderSaleUpdate, WorkOrderSaleOut, WorkOrderSaleActivityCreate, WorkOrderSaleActivityOut, WorkOrderSaleItemCreate,
     WorkOrderSaleDispatchCreate, WorkOrderSaleDispatchOut,
 )
+from app.schemas.bulk import BulkDeleteRequest, BulkDeleteResult
 
 router = APIRouter(prefix="/api/work-order-sales", tags=["Work Order Sales"])
 
@@ -598,6 +599,31 @@ def delete_work_order_sale(sale_id: int, deleted_by: Optional[str] = None, db: S
         recalc_wo_completed_quantities(db, wo)
     db.commit()
     log_activity(db, "WO Sale Deleted", "WorkOrderSale", f"Deleted sale invoice {sale.invoice_number} for {sale.client_name}.", deleted_by or "System", sale_id, entity_name=sale.invoice_number)
+
+
+@router.post("/bulk-delete", response_model=BulkDeleteResult)
+def bulk_delete_work_order_sales(payload: BulkDeleteRequest, db: Session = Depends(get_db)):
+    """Delete many WO Sale invoices in one request — best-effort per id,
+    mirrors delete_work_order_sale (including the parent WO's completed-
+    quantity recalculation).
+    """
+    deleted: list[int] = []
+    errors: list[str] = []
+    for sale_id in payload.ids:
+        sale = db.get(WorkOrderSale, sale_id)
+        if not sale:
+            errors.append(f"WO Sale {sale_id}: not found")
+            continue
+        wo = db.get(WorkOrder, sale.wo_id)
+        invoice_number, client_name = sale.invoice_number, sale.client_name
+        db.delete(sale)
+        db.flush()
+        if wo:
+            recalc_wo_completed_quantities(db, wo)
+        db.commit()
+        log_activity(db, "WO Sale Deleted", "WorkOrderSale", f"Deleted sale invoice {invoice_number} for {client_name}.", payload.deleted_by or "System", sale_id, entity_name=invoice_number)
+        deleted.append(sale_id)
+    return BulkDeleteResult(deleted=deleted, errors=errors)
 
 
 @router.post("/{sale_id}/activities", response_model=WorkOrderSaleActivityOut, status_code=status.HTTP_201_CREATED)
