@@ -20,6 +20,7 @@ from app.schemas.sale import (
     SaleCreate, SaleUpdate, SaleOut, SaleActivityCreate, SaleActivityOut, SaleItemCreate,
     SaleDispatchCreate, SaleDispatchOut,
 )
+from app.schemas.bulk import BulkDeleteRequest, BulkDeleteResult
 
 router = APIRouter(prefix="/api/sales", tags=["Sales"])
 
@@ -620,6 +621,30 @@ def delete_sale(sale_id: int, deleted_by: Optional[str] = None, db: Session = De
         recalc_po_delivered_quantities(db, po)
     db.commit()
     log_activity(db, "Sale Deleted", "Sale", f"Deleted sale invoice {sale.invoice_number} for {sale.client_name}.", deleted_by or "System", sale_id, entity_name=sale.invoice_number)
+
+
+@router.post("/bulk-delete", response_model=BulkDeleteResult)
+def bulk_delete_sales(payload: BulkDeleteRequest, db: Session = Depends(get_db)):
+    """Delete many Sale invoices in one request — best-effort per id, mirrors
+    delete_sale (including the parent PO's delivered-quantity recalculation).
+    """
+    deleted: list[int] = []
+    errors: list[str] = []
+    for sale_id in payload.ids:
+        sale = db.get(Sale, sale_id)
+        if not sale:
+            errors.append(f"Sale {sale_id}: not found")
+            continue
+        po = db.get(PurchaseOrder, sale.po_id)
+        invoice_number, client_name = sale.invoice_number, sale.client_name
+        db.delete(sale)
+        db.flush()
+        if po:
+            recalc_po_delivered_quantities(db, po)
+        db.commit()
+        log_activity(db, "Sale Deleted", "Sale", f"Deleted sale invoice {invoice_number} for {client_name}.", payload.deleted_by or "System", sale_id, entity_name=invoice_number)
+        deleted.append(sale_id)
+    return BulkDeleteResult(deleted=deleted, errors=errors)
 
 
 @router.post("/{sale_id}/activities", response_model=SaleActivityOut, status_code=status.HTTP_201_CREATED)

@@ -25,6 +25,7 @@ from app.routers import logs
 from app.routers import work_orders
 from app.routers import work_order_reports
 from app.routers import work_order_sales
+from app.routers import item_master
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -98,6 +99,15 @@ async def lifespan(app: FastAPI):
             except Exception:
                 try:
                     conn.execute(text("ALTER TABLE purchase_orders ADD COLUMN file_url VARCHAR(500) NULL"))
+                except Exception:
+                    pass
+
+            # Safely migrate work_orders.file_url
+            try:
+                conn.execute(text("SELECT file_url FROM work_orders LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("ALTER TABLE work_orders ADD COLUMN file_url VARCHAR(500) NULL"))
                 except Exception:
                     pass
 
@@ -268,6 +278,7 @@ app.include_router(logs.router)
 app.include_router(work_orders.router)
 app.include_router(work_order_reports.router)
 app.include_router(work_order_sales.router)
+app.include_router(item_master.router)
 
 
 @app.get("/", tags=["Health"])
