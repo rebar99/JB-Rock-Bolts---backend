@@ -40,7 +40,8 @@ class User(Base):
     @property
     def is_admin(self) -> bool:
         from app.config import settings
-        return self.email.strip().lower() == settings.ADMIN_EMAIL.strip().lower()
+        admin_emails = [e.strip().lower() for e in settings.ADMIN_EMAIL.split(",") if e.strip()]
+        return self.email.strip().lower() in admin_emails
 
 
 class ItemMasterItem(Base):
