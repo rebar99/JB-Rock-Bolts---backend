@@ -1,13 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Header
 from sqlalchemy.orm import Session
-from jose import jwt, JWTError
+from jose import jwt
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List
 from app.database import get_db
 from app.models.models import User, UserSession
 from app.schemas.user import UserCreate, UserUpdate, UserOut, UserLogin, Token, UserSessionOut
 from app.config import settings
 from app.utils.helpers import log_activity
+from app.utils.auth import get_user_id_from_token, require_admin
 
 router = APIRouter(prefix="/api/users", tags=["Users"])
 
@@ -30,30 +31,6 @@ def create_access_token(user_id: int) -> str:
         settings.SECRET_KEY,
         algorithm="HS256",
     )
-
-
-def _get_user_id_from_token(authorization: str) -> Optional[int]:
-    try:
-        scheme, token = authorization.split(" ", 1)
-        if scheme.lower() != "bearer":
-            return None
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-        user_id = int(payload.get("sub"))
-        return user_id
-    except (JWTError, ValueError, AttributeError):
-        return None
-
-
-def _require_admin(authorization: str, db: Session) -> User:
-    if not authorization:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token.")
-    user_id = _get_user_id_from_token(authorization)
-    if not user_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token.")
-    user = db.get(User, user_id)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required.")
-    return user
 
 
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
@@ -88,7 +65,7 @@ def list_pending_users(
     db: Session = Depends(get_db),
 ):
     """Admin-only: users who registered but have not yet been approved."""
-    _require_admin(authorization, db)
+    require_admin(authorization, db)
     return (
         db.query(User)
         .filter(User.is_active == False)
@@ -104,7 +81,7 @@ def approve_user(
     db: Session = Depends(get_db),
 ):
     """Admin-only: approve a pending registration so the user can log in."""
-    admin = _require_admin(authorization, db)
+    admin = require_admin(authorization, db)
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
@@ -128,7 +105,7 @@ def reject_user(
     db: Session = Depends(get_db),
 ):
     """Admin-only: reject a pending registration, removing it entirely."""
-    admin = _require_admin(authorization, db)
+    admin = require_admin(authorization, db)
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
@@ -186,7 +163,7 @@ def logout(authorization: str = Header(default=None), db: Session = Depends(get_
     if not authorization:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token.")
 
-    user_id = _get_user_id_from_token(authorization)
+    user_id = get_user_id_from_token(authorization)
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token.")
 
@@ -226,7 +203,7 @@ def heartbeat(authorization: str = Header(default=None), db: Session = Depends(g
     if not authorization:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token.")
 
-    user_id = _get_user_id_from_token(authorization)
+    user_id = get_user_id_from_token(authorization)
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token.")
 

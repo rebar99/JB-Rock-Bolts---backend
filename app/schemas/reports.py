@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 
 class ReportFilter(BaseModel):
@@ -118,3 +118,55 @@ class POFulfillmentSummaryOut(BaseModel):
     payment_received: float
     pending_payment: float
     delivery_status: str
+
+
+# ── Overview Report (Reports → Overview) ──────────────────────────────────────
+
+class OverviewSizeBreakdown(BaseModel):
+    size: str
+    size_label: str
+    ordered_qty: float
+    dispatched_qty: float
+    pending_qty: float
+
+
+class OverviewProductSummary(BaseModel):
+    product_type: str
+    ordered_qty: float
+    dispatched_qty: float
+    pending_qty: float
+    size_breakdown: List[OverviewSizeBreakdown]
+
+
+class OverviewSummary(BaseModel):
+    total_ordered_qty: float
+    total_dispatched_qty: float
+    total_pending_qty: float
+    total_clients: int
+    total_active_pos: int
+    total_active_wos: int
+    products: List[OverviewProductSummary]
+
+
+class OverviewRow(BaseModel):
+    source: str  # "PO" | "WO"
+    order_no: str
+    client_name: str
+    client_key: str
+    project: Optional[str] = None
+    product_type: str
+    item: str
+    uom: str = "Nos"
+    ordered_qty: float
+    dispatched_qty: float
+    pending_qty: float
+    size: Optional[str] = None
+    size_label: str
+
+
+class OverviewReportOut(BaseModel):
+    generated_at: datetime
+    summary: OverviewSummary
+    rows: List[OverviewRow]
+    # source ("PO" | "WO") -> client_key -> deduped project names
+    client_projects: Dict[str, Dict[str, List[str]]] = {}

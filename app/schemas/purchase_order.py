@@ -111,6 +111,11 @@ class PurchaseOrderOut(PurchaseOrderBase):
     short_closed_at: Optional[datetime] = None
     short_closed_by: Optional[str] = None
     short_closed_remark: Optional[str] = None
+    # True only on the response to PUT /{po_id} when nothing actually
+    # differed from what was already stored — lets the frontend show "No
+    # changes to save" instead of a misleading "Updated" toast. Always
+    # False on every other response (GET, POST, etc).
+    no_changes: bool = False
 
     @computed_field
     @property

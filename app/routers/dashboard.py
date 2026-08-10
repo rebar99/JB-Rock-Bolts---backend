@@ -1,14 +1,88 @@
 # pyrefly: ignore [missing-import]
+from datetime import datetime
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.database import get_db
 from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus
 from app.schemas.dashboard import DashboardStats, ChartData, ChartDataPoint, MonthlyTrend, RecentSale
-from app.utils.helpers import compute_sale_taxable_and_gst, compute_sale_grand_total, normalize_client_name
+from app.utils.helpers import (
+    compute_sale_taxable_and_gst, compute_sale_grand_total, normalize_client_name,
+    dedupe_names_by_normalized_key, parse_item_type_and_size, compute_line_taxable_and_gst,
+)
 from typing import List, cast, Any
 
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
+
+MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+# Grouping every distinct product_type into its own bar would turn 12 months
+# x N products into an unreadable wall of bars — only the top N by revenue
+# get their own bar/color; anything past that simply isn't broken out on
+# this chart (no catch-all "Other Products" bucket).
+TOP_PRODUCTS_LIMIT = 8
+
+
+@router.get("/monthly-product-sales")
+def get_monthly_product_sales(year: int = None, db: Session = Depends(get_db)):
+    """Grouped-bar data for the Dashboard's "Monthly Sales" chart — revenue
+    per Product Type, per calendar month, sourced from Sale Invoice line
+    items only (no dummy/static data). Product Type is derived from each
+    SaleItem's free-typed item name via parse_item_type_and_size() — the
+    same heuristic the Reports -> Overview dashboard and PO dia-wise expand
+    already use — so "Coupler"/"Pipe"/etc. here always match how those are
+    grouped everywhere else in the app. All 12 months are always present
+    (0 where a month/product has no sales) so the X-axis never skips one.
+    """
+    from app.models.models import SaleItem
+
+    target_year = year or datetime.utcnow().year
+
+    sales = (
+        db.query(Sale)
+        .options(joinedload(Sale.items))
+        .filter(func.year(Sale.created_at) == target_year)
+        .all()
+    )
+
+    month_product_revenue = {m: {} for m in range(12)}
+    product_totals = {}
+
+    for s in sales:
+        if not s.created_at:
+            continue
+        m_idx = s.created_at.month - 1
+        for it in s.items:
+            product_type, _, _ = parse_item_type_and_size(it.item)
+            taxable, gst = compute_line_taxable_and_gst(it.quantity, it.unit_price, it.gst_rate)
+            revenue = taxable + gst
+            month_product_revenue[m_idx][product_type] = month_product_revenue[m_idx].get(product_type, 0.0) + revenue
+            product_totals[product_type] = product_totals.get(product_type, 0.0) + revenue
+
+    ranked_products = [p for p, _ in sorted(product_totals.items(), key=lambda kv: kv[1], reverse=True)]
+    products = ranked_products[:TOP_PRODUCTS_LIMIT]
+
+    data = []
+    for i, name in enumerate(MONTH_NAMES):
+        row = {"month": name}
+        for p in products:
+            row[p] = round(month_product_revenue[i].get(p, 0.0), 2)
+        data.append(row)
+
+    return {"year": target_year, "months": MONTH_NAMES, "products": products, "data": data}
+
+
+@router.get("/clients", response_model=List[str])
+def get_dashboard_clients(db: Session = Depends(get_db)):
+    """Client names behind the "Total Clients" stat card — sourced from
+    Purchase Orders only (same PurchaseOrder.client_name + normalize_client_name
+    logic as the count in get_stats() below), so the dialog listing these
+    names always adds up to exactly the number shown on the card, and never
+    includes a client that only exists as an unused Client record (e.g. one
+    added via Work Orders or the "Add New Client" dialog but never used on
+    a PO).
+    """
+    all_po_clients = db.query(PurchaseOrder.client_name).all()
+    return dedupe_names_by_normalized_key([c[0] for c in all_po_clients], normalize_client_name)
 
 
 @router.get("/stats", response_model=DashboardStats)
@@ -223,5 +297,6 @@ def get_recent_sales(limit: int = 6, db: Session = Depends(get_db)):
             delivery_status=display_status,
             date=r.created_at.isoformat() if r.created_at else "",
             invoice_number=cast(str, r.invoice_number) if r.invoice_number else None,
+            po_number=cast(str, r.po_number) if r.po_number else None,
         ))
     return res

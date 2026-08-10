@@ -6,7 +6,8 @@ from datetime import datetime
 from app.database import get_db
 from app.models.models import WorkOrder, WOLineItem
 from app.schemas.work_order import WorkOrderCreate, WorkOrderUpdate, WorkOrderOut, WorkOrderClose
-from app.utils.helpers import log_activity, generate_wo_number
+from app.schemas.bulk import BulkDeleteRequest, BulkDeleteResult
+from app.utils.helpers import log_activity, generate_wo_number, values_equal_for_update
 from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
     parse_optional_datetime, make_excel_response, style_header_row,
@@ -346,57 +347,83 @@ def update_work_order(wo_id: int, payload: WorkOrderUpdate, db: Session = Depend
             detail=f"Cannot update a {wo.status} Work Order."
         )
 
-    update_data = payload.model_dump(exclude_unset=True, exclude={"line_items"})
+    # last_updated_by is metadata (who to attribute a real change to), not a
+    # comparable business field — it's excluded here so that simply having a
+    # different user open the form doesn't itself register as a "change".
+    update_data = payload.model_dump(exclude_unset=True, exclude={"line_items", "last_updated_by"})
     changed_fields = []
     for field, value in update_data.items():
         old_val = getattr(wo, field, None)
-        if old_val != value:
+        if not values_equal_for_update(old_val, value):
             changed_fields.append(field)
             setattr(wo, field, value)
 
+    # Only treat line items as changed if their actual values differ — the
+    # edit form always resubmits the full line_items array even when the
+    # user touched nothing, so a naive "payload.line_items is not None"
+    # check would flag every save as a change.
     if payload.line_items is not None:
-        changed_fields.append("line_items")
-        existing_items = {li.id: li for li in wo.line_items if getattr(li, 'id', None)}
+        existing_signature = [
+            (li.item, float(li.quantity or 0), li.uom, float(li.unit_price or 0), str(li.gst or ""), float(li.freight or 0))
+            for li in wo.line_items
+        ]
+        new_signature = [
+            (li_data.item, float(li_data.quantity or 0), li_data.uom, float(li_data.unit_price or 0), str(li_data.gst or ""), float(li_data.freight or 0))
+            for li_data in payload.line_items
+        ]
+        if existing_signature != new_signature:
+            changed_fields.append("line_items")
+            existing_items = {li.id: li for li in wo.line_items if getattr(li, 'id', None)}
 
-        new_line_items = []
-        for li_data in payload.line_items:
-            if li_data.id and li_data.id in existing_items:
-                li = existing_items[li_data.id]
-                # completed_quantity is intentionally NOT set from the client
-                # payload here — it is derived exclusively from Work Order
-                # Sale dispatches via recalc_wo_completed_quantities, the
-                # same discipline as PurchaseOrder.delivered_quantity.
-                li.item = li_data.item
-                li.quantity = li_data.quantity
-                li.uom = li_data.uom
-                li.unit_price = li_data.unit_price
-                li.gst = li_data.gst
-                li.freight = li_data.freight
-                new_line_items.append(li)
-                del existing_items[li_data.id]
-            else:
-                # New line items always start at 0 completed — same as
-                # POLineItem, which never accepts a client-supplied
-                # delivered_quantity on create either.
-                new_li = WOLineItem(
-                    item=li_data.item,
-                    quantity=li_data.quantity,
-                    uom=li_data.uom,
-                    unit_price=li_data.unit_price,
-                    gst=li_data.gst,
-                    freight=li_data.freight,
-                )
-                new_line_items.append(new_li)
+            new_line_items = []
+            for li_data in payload.line_items:
+                if li_data.id and li_data.id in existing_items:
+                    li = existing_items[li_data.id]
+                    # completed_quantity is intentionally NOT set from the client
+                    # payload here — it is derived exclusively from Work Order
+                    # Sale dispatches via recalc_wo_completed_quantities, the
+                    # same discipline as PurchaseOrder.delivered_quantity.
+                    li.item = li_data.item
+                    li.quantity = li_data.quantity
+                    li.uom = li_data.uom
+                    li.unit_price = li_data.unit_price
+                    li.gst = li_data.gst
+                    li.freight = li_data.freight
+                    new_line_items.append(li)
+                    del existing_items[li_data.id]
+                else:
+                    # New line items always start at 0 completed — same as
+                    # POLineItem, which never accepts a client-supplied
+                    # delivered_quantity on create either.
+                    new_li = WOLineItem(
+                        item=li_data.item,
+                        quantity=li_data.quantity,
+                        uom=li_data.uom,
+                        unit_price=li_data.unit_price,
+                        gst=li_data.gst,
+                        freight=li_data.freight,
+                    )
+                    new_line_items.append(new_li)
 
-        wo.line_items = new_line_items
+            wo.line_items = new_line_items
 
-        if wo.line_items:
-            first = wo.line_items[0]
-            wo.item = first.item
-            wo.uom = first.uom
-            wo.unit_price = first.unit_price
-            wo.total_quantity = sum(li.quantity for li in wo.line_items)
+            if wo.line_items:
+                first = wo.line_items[0]
+                wo.item = first.item
+                wo.uom = first.uom
+                wo.unit_price = first.unit_price
+                wo.total_quantity = sum(li.quantity for li in wo.line_items)
 
+    # Nothing to save — leave last_updated_at/by (and therefore the Activity
+    # column) untouched, and skip logging a no-op "WO Updated" entry, so
+    # clicking Save Changes without editing anything has no visible effect.
+    if not changed_fields:
+        db.rollback()
+        result = WorkOrderOut.model_validate(wo).model_dump(mode="json")
+        result["no_changes"] = True
+        return result
+
+    wo.last_updated_by = payload.last_updated_by
     wo.last_updated_at = datetime.utcnow()
 
     try:
@@ -409,17 +436,16 @@ def update_work_order(wo_id: int, payload: WorkOrderUpdate, db: Session = Depend
             detail=f"Work order with WO# '{payload.wo_number}' already exists.",
         )
 
-    details_str = f"Updated WO {wo.wo_number}."
-    if changed_fields:
-        details_str += f" Changed fields: {', '.join(changed_fields)}"
-
+    details_str = f"Updated WO {wo.wo_number}. Changed fields: {', '.join(changed_fields)}"
     log_activity(
         db, "WO Updated", "WorkOrder", details_str,
         wo.last_updated_by or "System", wo.id,
         entity_name=wo.wo_number,
-        changed_fields=", ".join(changed_fields) if changed_fields else None,
+        changed_fields=", ".join(changed_fields),
     )
-    return wo
+    result = WorkOrderOut.model_validate(wo).model_dump(mode="json")
+    result["no_changes"] = False
+    return result
 
 
 @router.post("/{wo_id}/close", response_model=WorkOrderOut)
@@ -457,6 +483,53 @@ def delete_work_order(wo_id: int, deleted_by: Optional[str] = None, db: Session 
         raise HTTPException(status_code=404, detail="Work order not found.")
 
     wo_number = wo.wo_number
+    # Deleting a WO cascades to any linked WO Sales/Invoices — each is
+    # deleted (and logged) individually first, mirroring the PO delete flow.
+    for sale in list(wo.work_order_sales):
+        sale_id, invoice_number, client_name = sale.id, sale.invoice_number, sale.client_name
+        db.delete(sale)
+        db.flush()
+        log_activity(
+            db, "WO Sale Deleted", "WorkOrderSale",
+            f"Deleted sale invoice {invoice_number} for {client_name} (cascaded from WO {wo_number} deletion).",
+            deleted_by or "System", sale_id, entity_name=invoice_number,
+        )
+
     db.delete(wo)
     db.commit()
     log_activity(db, "WO Deleted", "WorkOrder", f"Deleted WO {wo_number}.", deleted_by or "System", wo_id, entity_name=wo_number)
+
+
+@router.post("/bulk-delete", response_model=BulkDeleteResult)
+def bulk_delete_work_orders(payload: BulkDeleteRequest, db: Session = Depends(get_db)):
+    """Delete many Work Orders in one request — best-effort per id. Mirrors
+    delete_work_order's cascade: linked WO Sales are deleted (and logged)
+    before the WO itself.
+    """
+    deleted: list[int] = []
+    errors: list[str] = []
+    for wo_id in payload.ids:
+        wo = db.get(WorkOrder, wo_id)
+        if not wo:
+            errors.append(f"WO {wo_id}: not found")
+            continue
+        wo_number = wo.wo_number
+        try:
+            for sale in list(wo.work_order_sales):
+                sale_id, invoice_number, client_name = sale.id, sale.invoice_number, sale.client_name
+                db.delete(sale)
+                db.flush()
+                log_activity(
+                    db, "WO Sale Deleted", "WorkOrderSale",
+                    f"Deleted sale invoice {invoice_number} for {client_name} (cascaded from WO {wo_number} bulk deletion).",
+                    payload.deleted_by or "System", sale_id, entity_name=invoice_number,
+                )
+            db.delete(wo)
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            errors.append(f"WO {wo_number}: database constraint prevented deletion")
+            continue
+        log_activity(db, "WO Deleted", "WorkOrder", f"Deleted WO {wo_number}.", payload.deleted_by or "System", wo_id, entity_name=wo_number)
+        deleted.append(wo_id)
+    return BulkDeleteResult(deleted=deleted, errors=errors)

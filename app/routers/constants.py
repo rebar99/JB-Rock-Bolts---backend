@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.models import Client, Project
+from app.models.models import Client, Project, WorkOrder
+from app.utils.helpers import normalize_client_name, normalize_project_name, dedupe_names_by_normalized_key
 
 router = APIRouter(prefix="/api/constants", tags=["Constants"])
 
@@ -96,11 +97,24 @@ def get_constants(db: Session = Depends(get_db)):
     except Exception:
         db.rollback()
 
+    # Grouped by normalized name (not a raw exact-string set()), so
+    # "M/s. Afcons", "M/s Afcons Infrastructure Limited" and "afcons
+    # infrastructure limited" collapse into a single dropdown entry instead
+    # of each showing up as if they were different clients/projects.
     db_clients = db.query(Client.name).all()
-    all_clients = sorted(list(set([c[0] for c in db_clients])))
+    all_clients = dedupe_names_by_normalized_key([c[0] for c in db_clients], normalize_client_name)
 
     db_projects = db.query(Project.name).all()
-    all_projects = sorted(list(set([p[0] for p in db_projects])))
+    all_projects = dedupe_names_by_normalized_key([p[0] for p in db_projects], normalize_project_name)
+
+    # Work Orders draw their "Name of Client" dropdown from clients that
+    # actually have a Work Order on record — not the shared Clients master
+    # table `all_clients` uses, which also includes clients that only ever
+    # appeared on a Purchase Order. Selecting "Add New Client" still works
+    # for a brand-new client with no WO yet (it sets the form field
+    # directly rather than requiring the name to already be in this list).
+    wo_client_rows = db.query(WorkOrder.client_name).all()
+    wo_clients = dedupe_names_by_normalized_key([c[0] for c in wo_client_rows], normalize_client_name)
 
     return {
         "products": PRODUCTS,
@@ -109,6 +123,7 @@ def get_constants(db: Session = Depends(get_db)):
         "projects": all_projects,
         "payment_terms": PAYMENT_TERMS,
         "clients": all_clients,
+        "wo_clients": wo_clients,
         "payment_statuses": ["Pending", "Partial", "Paid"],
         "delivery_statuses": ["Not Delivered", "Delivered"],
         "inventory_statuses": ["In Stock", "Low Stock", "Out of Stock"],

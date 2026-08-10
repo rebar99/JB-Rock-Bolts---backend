@@ -1,20 +1,203 @@
+import re
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session, joinedload
 from typing import Optional
 from datetime import datetime
 from app.database import get_db
-from app.models.models import Record, PurchaseOrder, Sale, POLineItem, SaleDispatch
+from app.models.models import Record, PurchaseOrder, Sale, POLineItem, SaleDispatch, WorkOrder
 from app.schemas.reports import (
     ReportOut, ReportRow, FulfillmentReportOut, FulfillmentReportRow,
-    PendingPOReportOut, PendingPORow, POFulfillmentSummaryOut, DispatchHistoryRow
+    PendingPOReportOut, PendingPORow, POFulfillmentSummaryOut, DispatchHistoryRow,
+    OverviewReportOut, OverviewSummary, OverviewRow, OverviewProductSummary, OverviewSizeBreakdown,
 )
 from app.schemas.purchase_order import PurchaseOrderOut
 from app.routers.upload_helpers import (
     read_upload_bytes, parse_import_file, make_excel_response, style_header_row,
 )
-from app.utils.helpers import compute_sale_taxable_and_gst, compute_sale_grand_total, compute_line_taxable_and_gst
+from app.utils.helpers import (
+    compute_sale_taxable_and_gst, compute_sale_grand_total, compute_line_taxable_and_gst,
+    parse_item_type_and_size, normalize_client_name, normalize_project_name,
+    dedupe_names_by_normalized_key,
+)
 
 router = APIRouter(prefix="/api/reports", tags=["Reports"])
+
+
+# ── Overview Report (live product-wise pending dashboard) ────────────────────
+
+@router.get("/overview", response_model=OverviewReportOut)
+def get_overview_report(db: Session = Depends(get_db)):
+    """Live snapshot of Ordered/Dispatched/Pending quantity across every
+    Purchase Order and Work Order line item. Product Type and Dia/Pipe Size
+    are not stored columns anywhere — they're derived on the fly from the
+    free-typed item name via parse_item_type_and_size(), so a brand-new
+    product name automatically gets its own group with no code change.
+
+    No caching, no stored aggregate: every number here is summed straight
+    from POLineItem.quantity/delivered_quantity and WOLineItem.quantity/
+    completed_quantity on every request — the same live columns the PO/WO
+    Report tabs already read — so this always reflects the current DB state.
+    """
+    pos = db.query(PurchaseOrder).options(joinedload(PurchaseOrder.line_items)).all()
+    wos = db.query(WorkOrder).options(joinedload(WorkOrder.line_items)).all()
+
+    rows: list[OverviewRow] = []
+
+    for po in pos:
+        for li in po.line_items:
+            ordered = round(float(li.quantity or 0), 10)
+            dispatched = round(float(li.delivered_quantity or 0), 10)
+            pending = round(max(0.0, ordered - dispatched), 10)
+            product_type, size, size_label = parse_item_type_and_size(li.item)
+            rows.append(OverviewRow(
+                source="PO",
+                order_no=po.po_number,
+                client_name=po.client_name,
+                client_key=normalize_client_name(po.client_name) or (po.client_name or ""),
+                project=po.project,
+                product_type=product_type,
+                item=li.item,
+                uom=li.uom or "Nos",
+                ordered_qty=ordered,
+                dispatched_qty=dispatched,
+                pending_qty=pending,
+                size=size,
+                size_label=size_label,
+            ))
+
+    for wo in wos:
+        for li in wo.line_items:
+            ordered = round(float(li.quantity or 0), 10)
+            dispatched = round(float(li.completed_quantity or 0), 10)
+            pending = round(max(0.0, ordered - dispatched), 10)
+            product_type, size, size_label = parse_item_type_and_size(li.item)
+            rows.append(OverviewRow(
+                source="WO",
+                order_no=wo.wo_number,
+                client_name=wo.client_name,
+                client_key=normalize_client_name(wo.client_name) or (wo.client_name or ""),
+                project=wo.project,
+                product_type=product_type,
+                item=li.item,
+                uom=li.uom or "Nos",
+                ordered_qty=ordered,
+                dispatched_qty=dispatched,
+                pending_qty=pending,
+                size=size,
+                size_label=size_label,
+            ))
+
+    # Dynamic per-product-type summary — drives the Expand-1 size/dia
+    # breakdown, grouped purely by whatever product_type strings were
+    # derived above, so a new product automatically gets its own group
+    # with no code change.
+    product_totals: dict = {}
+    size_totals: dict = {}  # (product_type, size) -> {..., "size_label": ...}
+    for r in rows:
+        pt = product_totals.setdefault(r.product_type, {"ordered": 0.0, "dispatched": 0.0, "pending": 0.0})
+        pt["ordered"] += r.ordered_qty
+        pt["dispatched"] += r.dispatched_qty
+        pt["pending"] += r.pending_qty
+
+    for po in pos:
+        for li in po.line_items:
+            product_type, size, size_label = parse_item_type_and_size(li.item)
+            if size is None:
+                continue
+            ordered = round(float(li.quantity or 0), 10)
+            dispatched = round(float(li.delivered_quantity or 0), 10)
+            k = (product_type, size)
+            st = size_totals.setdefault(k, {"ordered": 0.0, "dispatched": 0.0, "size_label": size_label})
+            st["ordered"] += ordered
+            st["dispatched"] += dispatched
+    for wo in wos:
+        for li in wo.line_items:
+            product_type, size, size_label = parse_item_type_and_size(li.item)
+            if size is None:
+                continue
+            ordered = round(float(li.quantity or 0), 10)
+            dispatched = round(float(li.completed_quantity or 0), 10)
+            k = (product_type, size)
+            st = size_totals.setdefault(k, {"ordered": 0.0, "dispatched": 0.0, "size_label": size_label})
+            st["ordered"] += ordered
+            st["dispatched"] += dispatched
+
+    def _size_sort_key(size: str):
+        m = re.search(r"(\d+(?:\.\d+)?)", size)
+        return float(m.group(1)) if m else 0.0
+
+    products: list[OverviewProductSummary] = []
+    for product_type, totals in sorted(product_totals.items(), key=lambda kv: kv[0]):
+        breakdown = []
+        for (pt, size), st in size_totals.items():
+            if pt != product_type:
+                continue
+            ord_q = round(st["ordered"], 10)
+            disp_q = round(st["dispatched"], 10)
+            breakdown.append(OverviewSizeBreakdown(
+                size=size,
+                size_label=st["size_label"],
+                ordered_qty=ord_q,
+                dispatched_qty=disp_q,
+                pending_qty=round(max(0.0, ord_q - disp_q), 10),
+            ))
+        breakdown.sort(key=lambda b: _size_sort_key(b.size))
+        products.append(OverviewProductSummary(
+            product_type=product_type,
+            ordered_qty=round(totals["ordered"], 10),
+            dispatched_qty=round(totals["dispatched"], 10),
+            pending_qty=round(max(0.0, totals["pending"]), 10),
+            size_breakdown=breakdown,
+        ))
+
+    total_clients = len({
+        n for n in (normalize_client_name(po.client_name) for po in pos) if n
+    } | {
+        n for n in (normalize_client_name(wo.client_name) for wo in wos) if n
+    })
+    total_active_pos = sum(1 for po in pos if not po.short_closed and po.delivery_status != "Delivered")
+    total_active_wos = sum(1 for wo in wos if wo.status not in ("Completed", "Closed", "Cancelled"))
+
+    summary = OverviewSummary(
+        total_ordered_qty=round(sum(r.ordered_qty for r in rows), 10),
+        total_dispatched_qty=round(sum(r.dispatched_qty for r in rows), 10),
+        total_pending_qty=round(sum(r.pending_qty for r in rows), 10),
+        total_clients=total_clients,
+        total_active_pos=total_active_pos,
+        total_active_wos=total_active_wos,
+        products=products,
+    )
+
+    rows.sort(key=lambda r: (r.client_name or "", r.product_type or "", r.item or ""))
+
+    # Distinct project names per client, deduped the same way the PO/WO
+    # project dropdown is (so "2952 Kochi Elevated Metro" and a jammed
+    # "2952KochiElevatedMetro" typo collapse into one) — drives the
+    # click-a-project step in the Overview client expand when a client has
+    # 2+ projects on record. Split by PO vs WO (not one combined dict) so
+    # the Work Order Overview never lists a project that only ever showed
+    # up on that client's Purchase Orders, and vice versa.
+    def _client_projects_for(source: str) -> dict:
+        raw: dict = {}
+        for r in rows:
+            if r.source == source and r.project and r.project.strip():
+                raw.setdefault(r.client_key, []).append(r.project.strip())
+        return {
+            client_key: dedupe_names_by_normalized_key(names, normalize_project_name)
+            for client_key, names in raw.items()
+        }
+
+    client_projects = {
+        "PO": _client_projects_for("PO"),
+        "WO": _client_projects_for("WO"),
+    }
+
+    return OverviewReportOut(
+        generated_at=datetime.utcnow(),
+        summary=summary,
+        rows=rows,
+        client_projects=client_projects,
+    )
 
 
 # ── Sales Report ──────────────────────────────────────────────────────────────

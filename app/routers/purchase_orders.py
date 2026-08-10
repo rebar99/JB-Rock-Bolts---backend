@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Query
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Query, Header
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
@@ -6,7 +6,9 @@ from datetime import datetime
 from app.database import get_db
 from app.models.models import PurchaseOrder, POLineItem
 from app.schemas.purchase_order import PurchaseOrderCreate, PurchaseOrderUpdate, PurchaseOrderOut, PurchaseOrderShortClose
-from app.utils.helpers import log_activity, recalc_po_delivered_quantities
+from app.schemas.bulk import BulkDeleteRequest, BulkDeleteResult
+from app.utils.helpers import log_activity, recalc_po_delivered_quantities, values_equal_for_update
+from app.utils.auth import require_admin
 from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
     parse_optional_datetime, make_excel_response, style_header_row,
@@ -353,50 +355,76 @@ def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, db: Session 
             detail="Cannot update a Short Closed Purchase Order."
         )
 
-    update_data = payload.model_dump(exclude_unset=True, exclude={"line_items"})
+    # last_updated_by is metadata (who to attribute a real change to), not a
+    # comparable business field — it's excluded here so that simply having a
+    # different user open the form doesn't itself register as a "change".
+    update_data = payload.model_dump(exclude_unset=True, exclude={"line_items", "last_updated_by"})
     changed_fields = []
     for field, value in update_data.items():
         old_val = getattr(po, field, None)
-        if old_val != value:
+        if not values_equal_for_update(old_val, value):
             changed_fields.append(field)
             setattr(po, field, value)
 
+    # Only treat line items as changed if their actual values differ — the
+    # edit form always resubmits the full line_items array even when the
+    # user touched nothing, so a naive "payload.line_items is not None"
+    # check would flag every save as a change.
     if payload.line_items is not None:
-        changed_fields.append("line_items")
-        existing_items = {li.id: li for li in po.line_items if getattr(li, 'id', None)}
+        existing_signature = [
+            (li.item, float(li.quantity or 0), li.uom, float(li.unit_price or 0), str(li.gst or ""), float(li.freight or 0))
+            for li in po.line_items
+        ]
+        new_signature = [
+            (li_data.item, float(li_data.quantity or 0), li_data.uom, float(li_data.unit_price or 0), str(li_data.gst or ""), float(li_data.freight or 0))
+            for li_data in payload.line_items
+        ]
+        if existing_signature != new_signature:
+            changed_fields.append("line_items")
+            existing_items = {li.id: li for li in po.line_items if getattr(li, 'id', None)}
 
-        new_line_items = []
-        for li_data in payload.line_items:
-            if li_data.id and li_data.id in existing_items:
-                li = existing_items[li_data.id]
-                li.item = li_data.item
-                li.quantity = li_data.quantity
-                li.uom = li_data.uom
-                li.unit_price = li_data.unit_price
-                li.gst = li_data.gst
-                li.freight = li_data.freight
-                new_line_items.append(li)
-                del existing_items[li_data.id]
-            else:
-                new_li = POLineItem(
-                    item=li_data.item,
-                    quantity=li_data.quantity,
-                    uom=li_data.uom,
-                    unit_price=li_data.unit_price,
-                    gst=li_data.gst,
-                    freight=li_data.freight,
-                )
-                new_line_items.append(new_li)
+            new_line_items = []
+            for li_data in payload.line_items:
+                if li_data.id and li_data.id in existing_items:
+                    li = existing_items[li_data.id]
+                    li.item = li_data.item
+                    li.quantity = li_data.quantity
+                    li.uom = li_data.uom
+                    li.unit_price = li_data.unit_price
+                    li.gst = li_data.gst
+                    li.freight = li_data.freight
+                    new_line_items.append(li)
+                    del existing_items[li_data.id]
+                else:
+                    new_li = POLineItem(
+                        item=li_data.item,
+                        quantity=li_data.quantity,
+                        uom=li_data.uom,
+                        unit_price=li_data.unit_price,
+                        gst=li_data.gst,
+                        freight=li_data.freight,
+                    )
+                    new_line_items.append(new_li)
 
-        po.line_items = new_line_items
+            po.line_items = new_line_items
 
-        if po.line_items:
-            first = po.line_items[0]
-            po.item = first.item
-            po.uom = first.uom
-            po.unit_price = first.unit_price
-            po.total_quantity = sum(li.quantity for li in po.line_items)
+            if po.line_items:
+                first = po.line_items[0]
+                po.item = first.item
+                po.uom = first.uom
+                po.unit_price = first.unit_price
+                po.total_quantity = sum(li.quantity for li in po.line_items)
 
+    # Nothing to save — leave last_updated_at/by (and therefore the Activity
+    # column) untouched, and skip logging a no-op "PO Updated" entry, so
+    # clicking Save Changes without editing anything has no visible effect.
+    if not changed_fields:
+        db.rollback()
+        result = PurchaseOrderOut.model_validate(po).model_dump(mode="json")
+        result["no_changes"] = True
+        return result
+
+    po.last_updated_by = payload.last_updated_by
     po.last_updated_at = datetime.utcnow()
 
     try:
@@ -409,21 +437,30 @@ def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, db: Session 
             detail="Cannot update or remove line items because they are already linked to Sales/Invoices. Please delete the sales records first."
         )
 
-    details_str = f"Updated PO {po.po_number}."
-    if changed_fields:
-        details_str += f" Changed fields: {', '.join(changed_fields)}"
-
+    details_str = f"Updated PO {po.po_number}. Changed fields: {', '.join(changed_fields)}"
     log_activity(
         db, "PO Updated", "PurchaseOrder", details_str,
         po.last_updated_by or "System", po.id,
         entity_name=po.po_number,
-        changed_fields=", ".join(changed_fields) if changed_fields else None,
+        changed_fields=", ".join(changed_fields),
     )
-    return po
+    result = PurchaseOrderOut.model_validate(po).model_dump(mode="json")
+    result["no_changes"] = False
+    return result
 
 
 @router.post("/{po_id}/short-close", response_model=PurchaseOrderOut)
-def short_close_purchase_order(po_id: int, payload: PurchaseOrderShortClose, db: Session = Depends(get_db)):
+def short_close_purchase_order(
+    po_id: int,
+    payload: PurchaseOrderShortClose,
+    authorization: str = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    # Only Admin can close a PO — checked against the real logged-in
+    # identity (JWT), the same require_admin() the Item Master uses, not a
+    # client-supplied name string.
+    require_admin(authorization, db, "Access Denied – Only Admin can close a Purchase Order.")
+
     po = db.get(PurchaseOrder, po_id)
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found.")
@@ -462,13 +499,20 @@ def delete_purchase_order(po_id: int, deleted_by: Optional[str] = None, db: Sess
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found.")
 
-    if po.sales:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete this Purchase Order because it has linked Sales/Invoices. Please delete the sales records first."
+    po_number = po.po_number
+    # Deleting a PO cascades to any Sales/Invoices raised against it — each is
+    # deleted (and logged) individually first, so the PO delete never leaves
+    # orphaned Sale rows behind.
+    for sale in list(po.sales):
+        sale_id, invoice_number, client_name = sale.id, sale.invoice_number, sale.client_name
+        db.delete(sale)
+        db.flush()
+        log_activity(
+            db, "Sale Deleted", "Sale",
+            f"Deleted sale invoice {invoice_number} for {client_name} (cascaded from PO {po_number} deletion).",
+            deleted_by or "System", sale_id, entity_name=invoice_number,
         )
 
-    po_number = po.po_number
     try:
         db.delete(po)
         db.commit()
@@ -479,3 +523,39 @@ def delete_purchase_order(po_id: int, deleted_by: Optional[str] = None, db: Sess
             detail="Cannot delete this Purchase Order due to database constraints (linked records exist)."
         )
     log_activity(db, "PO Deleted", "PurchaseOrder", f"Deleted PO {po_number}.", deleted_by or "System", po_id, entity_name=po_number)
+
+
+@router.post("/bulk-delete", response_model=BulkDeleteResult)
+def bulk_delete_purchase_orders(payload: BulkDeleteRequest, db: Session = Depends(get_db)):
+    """Delete many Purchase Orders in one request — best-effort per id (a
+    missing id or a DB constraint on one PO is recorded in `errors` and does
+    not stop the rest of the batch). Mirrors delete_purchase_order's cascade:
+    linked Sales are deleted (and logged) before the PO itself.
+    """
+    deleted: list[int] = []
+    errors: list[str] = []
+    for po_id in payload.ids:
+        po = db.get(PurchaseOrder, po_id)
+        if not po:
+            errors.append(f"PO {po_id}: not found")
+            continue
+        po_number = po.po_number
+        try:
+            for sale in list(po.sales):
+                sale_id, invoice_number, client_name = sale.id, sale.invoice_number, sale.client_name
+                db.delete(sale)
+                db.flush()
+                log_activity(
+                    db, "Sale Deleted", "Sale",
+                    f"Deleted sale invoice {invoice_number} for {client_name} (cascaded from PO {po_number} bulk deletion).",
+                    payload.deleted_by or "System", sale_id, entity_name=invoice_number,
+                )
+            db.delete(po)
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            errors.append(f"PO {po_number}: database constraint prevented deletion")
+            continue
+        log_activity(db, "PO Deleted", "PurchaseOrder", f"Deleted PO {po_number}.", payload.deleted_by or "System", po_id, entity_name=po_number)
+        deleted.append(po_id)
+    return BulkDeleteResult(deleted=deleted, errors=errors)
