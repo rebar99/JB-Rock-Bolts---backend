@@ -62,7 +62,7 @@ class ItemMasterSize(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     item_id = Column(Integer, ForeignKey("item_master.id"), nullable=False)
-    size = Column(String(50), nullable=False)
+    size = Column(String(500), nullable=False)
     created_at = Column(DateTime, server_default=func.now())
     created_by = Column(String(100), nullable=True)
 
