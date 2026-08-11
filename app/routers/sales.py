@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Query
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 import os
 import uuid
@@ -348,12 +348,19 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db)):
             detail="Cannot create a dispatch or invoice against a Short Closed Purchase Order."
         )
 
+    if payload.invoice_date and payload.invoice_date < date(2026, 4, 1):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invoice Date cannot be before 1 April 2026."
+        )
+
     invoice_number = payload.invoice_number or generate_invoice_number(db)
 
     sale = Sale(
         po_id=payload.po_id,
         po_number=payload.po_number,
         invoice_number=invoice_number,
+        invoice_date=payload.invoice_date,
         client_name=payload.client_name,
         project=payload.project,
         subtotal=payload.subtotal,
@@ -465,6 +472,14 @@ def update_sale(sale_id: int, payload: SaleUpdate, db: Session = Depends(get_db)
 
     updates = payload.model_dump(exclude_unset=True)
     updated_by = updates.pop("updated_by", None)
+
+    if "invoice_date" in updates:
+        new_date = updates["invoice_date"]
+        if new_date and new_date < date(2026, 4, 1):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invoice Date cannot be before 1 April 2026."
+            )
 
     if "items" in updates:
         new_items_data = updates.pop("items")
