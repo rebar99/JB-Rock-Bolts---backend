@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, String, Float, Numeric, Text, DateTime, Boolean,
+    Column, Integer, String, Float, Numeric, Text, DateTime, Date, Boolean,
     ForeignKey, Enum, func,
 )
 from sqlalchemy.orm import relationship
@@ -364,6 +364,7 @@ class Sale(Base):
     po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=False)
     po_number = Column(String(100), nullable=False, index=True)
     invoice_number = Column(String(50), nullable=True, unique=True, index=True)
+    invoice_date = Column(Date, nullable=True)
     client_name = Column(String(200), nullable=False, index=True)
     project = Column(String(300), nullable=True)
     

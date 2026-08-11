@@ -271,7 +271,7 @@ def get_report(
 
         rows.append(ReportRow(
             id=s.id,
-            date=s.created_at.strftime("%d-%m-%Y") if s.created_at else "",
+            date=s.invoice_date.strftime("%d-%m-%Y") if getattr(s, 'invoice_date', None) else (s.created_at.strftime("%d-%m-%Y") if s.created_at else ""),
             client_name=s.client_name,
             product=s.items_display,
             location=s.project or "—",
@@ -563,7 +563,7 @@ def get_po_fulfillment_summary(po_id: int, db: Session = Depends(get_db)):
                     tracked_qty_by_item[k] = already + shown_qty
                     event_had_visible_row = True
                     dated_rows.append((event_date, DispatchHistoryRow(
-                        date=event_date.strftime("%d-%m-%Y") if d.dispatched_at else "—",
+                        date=s.invoice_date.strftime("%d-%m-%Y") if getattr(s, 'invoice_date', None) else (event_date.strftime("%d-%m-%Y") if d.dispatched_at else "-"),
                         invoice_number=event_invoice,
                         item=mi["item"],
                         dispatch_qty=round(shown_qty, 10),
@@ -578,7 +578,7 @@ def get_po_fulfillment_summary(po_id: int, db: Session = Depends(get_db)):
                 aggregate_only_tracked_qty += float(d.quantity)
                 event_had_visible_row = True
                 dated_rows.append((event_date, DispatchHistoryRow(
-                    date=event_date.strftime("%d-%m-%Y") if d.dispatched_at else "—",
+                    date=s.invoice_date.strftime("%d-%m-%Y") if getattr(s, 'invoice_date', None) else (event_date.strftime("%d-%m-%Y") if d.dispatched_at else "-"),
                     invoice_number=event_invoice,
                     item=None,
                     dispatch_qty=round(float(d.quantity), 10),
@@ -617,7 +617,7 @@ def get_po_fulfillment_summary(po_id: int, db: Session = Depends(get_db)):
             total_qty = item_qty_by_name[k]
             ratio = remainder_qty / total_qty if total_qty else 0
             dated_rows.append((s.created_at or datetime.min, DispatchHistoryRow(
-                date=s.created_at.strftime("%d-%m-%Y") if s.created_at else "—",
+                date=s.invoice_date.strftime("%d-%m-%Y") if getattr(s, 'invoice_date', None) else (s.created_at.strftime("%d-%m-%Y") if s.created_at else "-"),
                 invoice_number=s.invoice_number,
                 item=item_display_name[k],
                 dispatch_qty=remainder_qty,
