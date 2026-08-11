@@ -124,7 +124,7 @@ def get_work_order_sales_report(
 
         rows.append(WorkOrderSaleReportRow(
             id=s.id,
-            date=s.created_at.strftime("%d-%m-%Y") if s.created_at else "",
+            date=s.invoice_date.strftime("%d-%m-%Y") if s.invoice_date else (s.created_at.strftime("%d-%m-%Y") if s.created_at else ""),
             invoice_number=s.invoice_number,
             wo_number=s.wo_number,
             client_name=s.client_name,
