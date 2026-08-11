@@ -74,6 +74,15 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     pass
 
+            # Safely migrate work_order_sales.invoice_date
+            try:
+                conn.execute(text("SELECT invoice_date FROM work_order_sales LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("ALTER TABLE work_order_sales ADD COLUMN invoice_date DATE NULL"))
+                except Exception:
+                    pass
+
             # Safely migrate po_line_items.delivered_quantity
             try:
                 conn.execute(text("SELECT delivered_quantity FROM po_line_items LIMIT 1"))

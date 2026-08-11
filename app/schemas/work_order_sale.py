@@ -1,5 +1,5 @@
 from pydantic import BaseModel, computed_field
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, List
 from app.models.models import PaymentStatus
 from app.schemas.base import UTCDatetime, OptUTCDatetime
@@ -120,6 +120,7 @@ class WorkOrderSaleCreate(BaseModel):
     wo_id: int
     wo_number: str
     invoice_number: Optional[str] = None
+    invoice_date: Optional[date] = None
     client_name: str
     project: Optional[str] = None
     items: List[WorkOrderSaleItemCreate]
@@ -143,6 +144,7 @@ class WorkOrderSaleCreate(BaseModel):
 
 class WorkOrderSaleUpdate(BaseModel):
     invoice_number: Optional[str] = None
+    invoice_date: Optional[date] = None
     payment_status: Optional[PaymentStatus] = None
     payment_note: Optional[str] = None
     invoice_url: Optional[str] = None
@@ -169,6 +171,7 @@ class WorkOrderSaleOut(BaseModel):
     wo_id: int
     wo_number: str
     invoice_number: Optional[str] = None
+    invoice_date: Optional[date] = None
     client_name: str
     project: Optional[str] = None
     freight: float

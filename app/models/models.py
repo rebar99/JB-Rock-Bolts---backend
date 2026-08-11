@@ -699,6 +699,7 @@ class WorkOrderSale(Base):
     wo_id = Column(Integer, ForeignKey("work_orders.id"), nullable=False)
     wo_number = Column(String(100), nullable=False, index=True)
     invoice_number = Column(String(50), nullable=True, unique=True, index=True)
+    invoice_date = Column(Date, nullable=True)
     client_name = Column(String(200), nullable=False, index=True)
     project = Column(String(300), nullable=True)
 
