@@ -54,12 +54,10 @@ MODELS = [
 
 class JSONEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, datetime.datetime):
-            return obj.isoformat()
-        if isinstance(obj, datetime.date):
+        if isinstance(obj, (datetime.datetime, datetime.date)):
             return obj.isoformat()
         if isinstance(obj, decimal.Decimal):
-            return float(obj)
+            return str(obj)
         # Handle enums
         if hasattr(obj, "value"):
             return obj.value
@@ -78,8 +76,9 @@ def export_database(db: Session = Depends(get_db)):
         # Convert to dict, removing SQLAlchemy internal state
         serialized_records = []
         for r in records:
-            r_dict = r.__dict__.copy()
-            r_dict.pop('_sa_instance_state', None)
+            r_dict = {}
+            for c in model.__table__.columns:
+                r_dict[c.name] = getattr(r, c.name)
             serialized_records.append(r_dict)
         backup_data[table_name] = serialized_records
 
@@ -126,8 +125,9 @@ async def import_database(
             records = db.query(model).all()
             serialized = []
             for r in records:
-                r_dict = r.__dict__.copy()
-                r_dict.pop('_sa_instance_state', None)
+                r_dict = {}
+                for c in model.__table__.columns:
+                    r_dict[c.name] = getattr(r, c.name)
                 serialized.append(r_dict)
             safety_data[table_name] = serialized
 
@@ -168,14 +168,14 @@ async def import_database(
             'sales': ['invoice_number'],
             'sale_items': ['sale_id', 'item'],
             'work_order_sales': ['invoice_number'],
-            'work_order_sale_items': ['wo_sale_id', 'item'],
+            'work_order_sale_items': ['sale_id', 'item'],
             'records': ['grn_number'],
             'system_logs': ['timestamp', 'action', 'entity_name'],
             'sale_activities': ['sale_id', 'action', 'timestamp'],
-            'work_order_sale_activities': ['wo_sale_id', 'action', 'timestamp'],
+            'work_order_sale_activities': ['sale_id', 'action', 'timestamp'],
             'sale_dispatches': ['sale_id', 'timestamp'],
             'sale_dispatch_items': ['dispatch_id', 'item'],
-            'work_order_sale_dispatches': ['wo_sale_id', 'timestamp'],
+            'work_order_sale_dispatches': ['sale_id', 'timestamp'],
             'work_order_sale_dispatch_items': ['dispatch_id', 'item'],
         }
 
@@ -211,8 +211,8 @@ async def import_database(
                     for col in unique_cols:
                         filters[col] = row.get(col)
                     
-                    # Only check if all unique columns have values
-                    if all(v is not None for v in filters.values()):
+                    # Only query if we have at least one valid key value
+                    if any(v is not None for v in filters.values()):
                         existing = db.query(model).filter_by(**filters).first()
                         
                 if existing:
