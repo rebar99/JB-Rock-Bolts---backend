@@ -94,6 +94,8 @@ def export_database(db: Session = Depends(get_db)):
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
+import os
+
 @router.post("/backup/import")
 async def import_database(
     file: UploadFile = File(...),
@@ -101,7 +103,7 @@ async def import_database(
 ):
     """
     Import a complete database JSON dump.
-    WARNING: This wipes existing data and replaces it with the backup.
+    Performs a safe, non-destructive merge using ID remapping.
     """
     if not file.filename.endswith(".json"):
         raise HTTPException(status_code=400, detail="Only JSON files are allowed.")
@@ -113,31 +115,31 @@ async def import_database(
         raise HTTPException(status_code=400, detail=f"Invalid JSON file: {str(e)}")
 
     try:
-        # Disable foreign key checks
-        db.execute(text("SET FOREIGN_KEY_CHECKS=0;"))
+        # 1. Create a Safety Backup before proceeding
+        backup_dir = "uploads/backups"
+        os.makedirs(backup_dir, exist_ok=True)
+        safety_filename = f"{backup_dir}/safety_backup_pre_import_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         
-        # 1. Delete all existing data
-        # Reverse order to delete children before parents
-        for model in reversed(MODELS):
-            table_name = model.__tablename__
-            db.execute(text(f"DELETE FROM {table_name}"))
-            
-        # 2. Insert records from backup
+        safety_data = {}
         for model in MODELS:
             table_name = model.__tablename__
-            records = backup_data.get(table_name, [])
-            if not records:
-                continue
-                
-            # Date/Time parsing for records is mostly handled by SQLAlchemy if formatted as ISO,
-            # but we need to ensure strings are parsed into Python objects if SQLAlchemy expects them.
-            # Convert ISO datetime strings back to datetime objects where necessary because bulk_insert_mappings
-            # bypassing ORM might have strict type requirements for some drivers.
+            records = db.query(model).all()
+            serialized = []
+            for r in records:
+                r_dict = r.__dict__.copy()
+                r_dict.pop('_sa_instance_state', None)
+                serialized.append(r_dict)
+            safety_data[table_name] = serialized
+
+        with open(safety_filename, "w") as f:
+            json.dump(safety_data, f, cls=JSONEncoder)
+
+        # 2. Parse Dates for the imported data
+        for table_name, records in backup_data.items():
             for record in records:
                 for key, value in record.items():
                     if isinstance(value, str):
                         try:
-                            # Basic check for isoformat (len 10 for date, >=19 for datetime)
                             if len(value) == 10 and value.count("-") == 2:
                                 record[key] = datetime.datetime.strptime(value, "%Y-%m-%d").date()
                             elif "T" in value and (len(value) == 19 or "." in value):
@@ -145,15 +147,91 @@ async def import_database(
                         except (ValueError, TypeError):
                             pass
 
-            db.bulk_insert_mappings(model, records)
+        # 3. ID Remapping and Deduplication
+        id_map = {model.__tablename__: {} for model in MODELS}
+
+        UNIQUE_KEYS = {
+            'users': ['email'],
+            'company_addresses': ['name'],
+            'clients': ['name'],
+            'projects': ['name', 'client_id'],
+            'uom_options': ['name'],
+            'item_master': ['name'],
+            'item_master_sizes': ['item_id', 'size'],
+            'wo_item_master': ['name'],
+            'wo_item_master_sizes': ['item_id', 'size'],
+            'products': ['name'],
+            'purchase_orders': ['po_number'],
+            'po_line_items': ['po_id', 'item'],
+            'work_orders': ['wo_number'],
+            'wo_line_items': ['wo_id', 'item'],
+            'sales': ['invoice_number'],
+            'sale_items': ['sale_id', 'item'],
+            'work_order_sales': ['invoice_number'],
+            'work_order_sale_items': ['wo_sale_id', 'item'],
+            'records': ['grn_number'],
+            'system_logs': ['timestamp', 'action', 'entity_name'],
+            'sale_activities': ['sale_id', 'action', 'timestamp'],
+            'work_order_sale_activities': ['wo_sale_id', 'action', 'timestamp'],
+            'sale_dispatches': ['sale_id', 'timestamp'],
+            'sale_dispatch_items': ['dispatch_id', 'item'],
+            'work_order_sale_dispatches': ['wo_sale_id', 'timestamp'],
+            'work_order_sale_dispatch_items': ['dispatch_id', 'item'],
+        }
+
+        for model in MODELS:
+            table_name = model.__tablename__
+            records = backup_data.get(table_name, [])
+            unique_cols = UNIQUE_KEYS.get(table_name)
             
-        # Re-enable foreign key checks
-        db.execute(text("SET FOREIGN_KEY_CHECKS=1;"))
+            # Introspect foreign keys for this model
+            fks = {}
+            for c in model.__table__.columns:
+                if c.foreign_keys:
+                    for fk in c.foreign_keys:
+                        fks[c.name] = fk.column.table.name
+
+            for row in records:
+                old_id = row.get('id')
+                
+                # A. Translate Foreign Keys
+                for fk_col, target_table in fks.items():
+                    old_fk_val = row.get(fk_col)
+                    if old_fk_val is not None:
+                        if target_table in id_map and old_fk_val in id_map[target_table]:
+                            row[fk_col] = id_map[target_table][old_fk_val]
+
+                # B. Deduplication Check
+                existing = None
+                if unique_cols:
+                    filters = {}
+                    for col in unique_cols:
+                        filters[col] = row.get(col)
+                    
+                    # Only check if all unique columns have values
+                    if all(v is not None for v in filters.values()):
+                        existing = db.query(model).filter_by(**filters).first()
+                        
+                if existing:
+                    if old_id:
+                        id_map[table_name][old_id] = existing.id
+                    continue # Skip duplicate
+                    
+                # C. Insert New Record
+                if 'id' in row:
+                    del row['id']
+                    
+                new_instance = model(**row)
+                db.add(new_instance)
+                db.flush()
+                
+                if old_id:
+                    id_map[table_name][old_id] = new_instance.id
+                    
         db.commit()
         
-        return {"detail": "Data imported successfully. All Purchase Orders, Work Orders, Sales and related records have been restored."}
+        return {"detail": "Database safely merged. Duplicates were skipped and relationships perfectly maintained."}
     
     except Exception as e:
         db.rollback()
-        db.execute(text("SET FOREIGN_KEY_CHECKS=1;"))
-        raise HTTPException(status_code=500, detail=f"Database import failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Merge failed, no changes made. Error: {str(e)}")
