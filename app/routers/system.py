@@ -179,6 +179,9 @@ async def import_database(
             'work_order_sale_dispatch_items': ['dispatch_id', 'item'],
         }
 
+        records_inserted = 0
+        records_skipped = 0
+
         for model in MODELS:
             table_name = model.__tablename__
             records = backup_data.get(table_name, [])
@@ -215,6 +218,7 @@ async def import_database(
                 if existing:
                     if old_id:
                         id_map[table_name][old_id] = existing.id
+                    records_skipped += 1
                     continue # Skip duplicate
                     
                 # C. Insert New Record
@@ -227,10 +231,15 @@ async def import_database(
                 
                 if old_id:
                     id_map[table_name][old_id] = new_instance.id
+                records_inserted += 1
                     
         db.commit()
         
-        return {"detail": "Database safely merged. Duplicates were skipped and relationships perfectly maintained."}
+        return {
+            "detail": "Database safely merged.",
+            "records_inserted": records_inserted,
+            "records_skipped": records_skipped
+        }
     
     except Exception as e:
         db.rollback()
