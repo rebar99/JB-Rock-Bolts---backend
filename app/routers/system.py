@@ -171,11 +171,11 @@ async def import_database(
             'work_order_sale_items': ['sale_id', 'item'],
             'records': ['grn_number'],
             'system_logs': ['timestamp', 'action', 'entity_name'],
-            'sale_activities': ['sale_id', 'action', 'timestamp'],
-            'work_order_sale_activities': ['sale_id', 'action', 'timestamp'],
-            'sale_dispatches': ['sale_id', 'timestamp'],
+            'sale_activities': ['sale_id', 'action', 'at'],
+            'work_order_sale_activities': ['sale_id', 'action', 'at'],
+            'sale_dispatches': ['sale_id', 'dispatched_at'],
             'sale_dispatch_items': ['dispatch_id', 'item'],
-            'work_order_sale_dispatches': ['sale_id', 'timestamp'],
+            'work_order_sale_dispatches': ['sale_id', 'dispatched_at'],
             'work_order_sale_dispatch_items': ['dispatch_id', 'item'],
         }
 
