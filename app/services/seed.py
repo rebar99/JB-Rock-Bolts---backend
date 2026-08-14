@@ -22,6 +22,17 @@ PRODUCTS = [
 
 
 def run_seed(db: Session):
+    from app.models.models import CompanyAddress
+    if db.query(CompanyAddress).count() == 0:
+        logger.info("Seeding default company address...")
+        default_address = CompanyAddress(
+            title="RE BAR COUPLERS INDIA PRIVATE LIMITED (FY2026-27)",
+            address_text="RE BAR COUPLERS INDIA PRIVATE LIMITED (FY2026-27)\nRegd. Office: 10B, Block 23, Industrial Area, Nangal Jarialan, Distt. Una, Himachal Pradesh – 177212, India\nPlant Address: VPO Palakwaha, Tehsil Haroli, Una, Himachal Pradesh – 177220\nIEC Code No.: 2216900613\nGSTIN/UIN: 02AAFCR5621L1ZG\nState: Himachal Pradesh, Code: 02\nE-Mail: accounts@jbenineeringcorporation.com",
+            is_default=True
+        )
+        db.add(default_address)
+        db.commit()
+
     if db.query(User).filter_by(email="admin@jbrockbolts.com").first():
         logger.info("Database already seeded with admin user. Skipping.")
         return

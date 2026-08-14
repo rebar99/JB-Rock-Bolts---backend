@@ -847,3 +847,14 @@ class UserSession(Base):
     is_active = Column(Boolean, default=True, nullable=False)
 
     user_rel = relationship("User", foreign_keys=[user_id])
+
+
+class CompanyAddress(Base):
+    __tablename__ = "company_addresses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(200), nullable=False)
+    address_text = Column(Text, nullable=False)
+    is_default = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
