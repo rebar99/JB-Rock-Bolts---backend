@@ -150,7 +150,7 @@ app/
 |---|---|
 | `users` | Application users (name, email, bcrypt password) |
 | `clients` | Client companies with location |
-| `products` | Inventory items with stock quantity |
+| `products` | Inventory items with stock quantity | 
 | `purchase_orders` | POs with quantities, pricing, activity timestamps |
 | `sales` | Dispatch records linked to POs, with invoice numbers |
 | `sale_activities` | Audit trail for each sale |
