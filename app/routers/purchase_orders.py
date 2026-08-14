@@ -500,17 +500,10 @@ def delete_purchase_order(po_id: int, deleted_by: Optional[str] = None, db: Sess
         raise HTTPException(status_code=404, detail="Purchase order not found.")
 
     po_number = po.po_number
-    # Deleting a PO cascades to any Sales/Invoices raised against it — each is
-    # deleted (and logged) individually first, so the PO delete never leaves
-    # orphaned Sale rows behind.
-    for sale in list(po.sales):
-        sale_id, invoice_number, client_name = sale.id, sale.invoice_number, sale.client_name
-        db.delete(sale)
-        db.flush()
-        log_activity(
-            db, "Sale Deleted", "Sale",
-            f"Deleted sale invoice {invoice_number} for {client_name} (cascaded from PO {po_number} deletion).",
-            deleted_by or "System", sale_id, entity_name=invoice_number,
+    if po.sales:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete Purchase Order: Please delete the associated Sales first."
         )
 
     try:
@@ -541,15 +534,9 @@ def bulk_delete_purchase_orders(payload: BulkDeleteRequest, db: Session = Depend
             continue
         po_number = po.po_number
         try:
-            for sale in list(po.sales):
-                sale_id, invoice_number, client_name = sale.id, sale.invoice_number, sale.client_name
-                db.delete(sale)
-                db.flush()
-                log_activity(
-                    db, "Sale Deleted", "Sale",
-                    f"Deleted sale invoice {invoice_number} for {client_name} (cascaded from PO {po_number} bulk deletion).",
-                    payload.deleted_by or "System", sale_id, entity_name=invoice_number,
-                )
+            if po.sales:
+                errors.append(f"PO {po_number}: Cannot delete Purchase Order because it has associated Sales. Please delete the Sales first.")
+                continue
             db.delete(po)
             db.commit()
         except IntegrityError:
