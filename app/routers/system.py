@@ -2,10 +2,12 @@ import json
 import datetime
 import decimal
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.database import get_db
+from app.routers.sales import recalc_po_delivered_quantities
+from app.routers.work_order_sales import recalc_wo_completed_quantities
 
 # Import all models
 from app.models.models import (
@@ -98,6 +100,7 @@ import os
 @router.post("/backup/import")
 async def import_database(
     file: UploadFile = File(...),
+    import_type: str = Form("merge"),
     db: Session = Depends(get_db)
 ):
     """
@@ -152,7 +155,7 @@ async def import_database(
 
         UNIQUE_KEYS = {
             'users': ['email'],
-            'company_addresses': ['name'],
+            'company_addresses': ['title'],
             'clients': ['name'],
             'projects': ['name', 'client_id'],
             'uom_options': ['name'],
@@ -162,15 +165,15 @@ async def import_database(
             'wo_item_master_sizes': ['item_id', 'size'],
             'products': ['name'],
             'purchase_orders': ['po_number'],
-            'po_line_items': ['po_id', 'item'],
+            'po_line_items': ['po_id', 'item', 'quantity', 'unit_price'],
             'work_orders': ['wo_number'],
-            'wo_line_items': ['wo_id', 'item'],
+            'wo_line_items': ['wo_id', 'item', 'quantity'],
             'sales': ['invoice_number'],
-            'sale_items': ['sale_id', 'item'],
+            'sale_items': ['sale_id', 'item', 'quantity', 'unit_price'],
             'work_order_sales': ['invoice_number'],
-            'work_order_sale_items': ['sale_id', 'item'],
-            'records': ['grn_number'],
-            'system_logs': ['timestamp', 'action', 'entity_name'],
+            'work_order_sale_items': ['sale_id', 'item', 'quantity', 'unit_price'],
+            'records': ['invoice_number', 'po_number'],
+            'system_logs': None,
             'sale_activities': ['sale_id', 'action', 'at'],
             'work_order_sale_activities': ['sale_id', 'action', 'at'],
             'sale_dispatches': ['sale_id', 'dispatched_at'],
@@ -181,6 +184,20 @@ async def import_database(
 
         records_inserted = 0
         records_skipped = 0
+        
+        # If replace mode, clear database first in correct dependency order
+        if import_type == "replace":
+            for model in reversed(MODELS):
+                db.query(model).delete()
+            db.commit()
+            
+        # Track IDs of newly inserted records so their children bypass deduplication
+        inserted_parent_ids = {model.__tablename__: set() for model in MODELS}
+        
+        # Track which existing DB records we've already matched in this import session
+        # This prevents two identical backup rows from mapping to the SAME single DB row,
+        # which correctly restores perfectly identical line items that were dropped previously.
+        matched_db_ids = set()
 
         for model in MODELS:
             table_name = model.__tablename__
@@ -198,22 +215,43 @@ async def import_database(
                 old_id = row.get('id')
                 
                 # A. Translate Foreign Keys
-                for fk_col, target_table in fks.items():
-                    old_fk_val = row.get(fk_col)
-                    if old_fk_val is not None:
-                        if target_table in id_map and old_fk_val in id_map[target_table]:
-                            row[fk_col] = id_map[target_table][old_fk_val]
+                if import_type == "merge":
+                    for fk_col, target_table in fks.items():
+                        old_fk_val = row.get(fk_col)
+                        if old_fk_val is not None:
+                            if target_table in id_map and old_fk_val in id_map[target_table]:
+                                row[fk_col] = id_map[target_table][old_fk_val]
 
-                # B. Deduplication Check
+                # Only run deduplication logic if we are merging
                 existing = None
-                if unique_cols:
-                    filters = {}
-                    for col in unique_cols:
-                        filters[col] = row.get(col)
-                    
-                    # Only query if we have at least one valid key value
-                    if any(v is not None for v in filters.values()):
-                        existing = db.query(model).filter_by(**filters).first()
+                belongs_to_new_parent = False
+                
+                if import_type == "merge":
+                    # Check if this record belongs to a parent that was JUST inserted
+                    for fk_col, target_table in fks.items():
+                        val = row.get(fk_col)
+                        if val is not None and target_table in inserted_parent_ids and val in inserted_parent_ids[target_table]:
+                            belongs_to_new_parent = True
+                            break
+
+                    # If the parent was just inserted, we don't deduplicate! We know it's a fresh child.
+                    # This perfectly preserves identical line items in a fresh invoice.
+                    if unique_cols and not belongs_to_new_parent:
+                        filters = {}
+                        for col in unique_cols:
+                            filters[col] = row.get(col)
+                        
+                        # Only query if we have at least one valid key value
+                        if any(v is not None for v in filters.values()):
+                            matching_records = db.query(model).filter_by(**filters).all()
+                            for rec in matching_records:
+                                # Create a unique tracking key for this table's ID
+                                match_key = f"{table_name}_{rec.id}"
+                                if match_key not in matched_db_ids:
+                                    existing = rec
+                                    matched_db_ids.add(match_key)
+                                    break
+
                         
                 if existing:
                     if old_id:
@@ -221,19 +259,29 @@ async def import_database(
                     records_skipped += 1
                     continue # Skip duplicate
                     
-                # C. Insert New Record
-                if 'id' in row:
+                # In merge mode, strip ID so it gets a new one. In replace mode, KEEP IT.
+                if old_id and import_type == "merge":
                     del row['id']
                     
                 new_instance = model(**row)
                 db.add(new_instance)
                 db.flush()
                 
-                if old_id:
+                inserted_parent_ids[table_name].add(new_instance.id)
+                
+                if old_id and import_type == "merge":
                     id_map[table_name][old_id] = new_instance.id
                 records_inserted += 1
                     
         db.commit()
+
+        # D. Post-Import: Recalculate all cached quantities to guarantee dashboard accuracy
+        for po in db.query(PurchaseOrder).all():
+            recalc_po_delivered_quantities(db, po)
+        for wo in db.query(WorkOrder).all():
+            recalc_wo_completed_quantities(db, wo)
+        db.commit()
+
         
         return {
             "detail": "Database safely merged.",

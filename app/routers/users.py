@@ -245,6 +245,17 @@ def active_sessions(db: Session = Depends(get_db)):
     )
 
 
+@router.get("/recent-logins", response_model=List[UserSessionOut])
+def recent_logins(db: Session = Depends(get_db)):
+    """Returns the most recent 20 logins across all users."""
+    return (
+        db.query(UserSession)
+        .order_by(UserSession.login_at.desc())
+        .limit(20)
+        .all()
+    )
+
+
 @router.get("", response_model=list[UserOut])
 def list_users(db: Session = Depends(get_db)):
     return db.query(User).filter(User.is_active == True).all()
