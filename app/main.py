@@ -266,6 +266,18 @@ async def lifespan(app: FastAPI):
     try:
         from app.services.seed import run_seed
         run_seed(db)
+        # On every server start, mark all previously "active" sessions as logged out.
+        # This prevents stale "Online" entries in History when the server was restarted
+        # and users didn't explicitly logout (SSE connection was cut by the restart).
+        from app.models.models import UserSession
+        from datetime import datetime, timezone
+        stale = db.query(UserSession).filter(UserSession.is_active == True).all()
+        for s in stale:
+            s.is_active = False
+            s.logout_at = datetime.now(timezone.utc)
+        db.commit()
+        if stale:
+            logger.info(f"Cleared {len(stale)} stale session(s) from previous server run.")
     finally:
         db.close()
 

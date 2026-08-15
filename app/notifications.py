@@ -44,6 +44,7 @@ def add_client(q: asyncio.Queue, user_id: Optional[int] = None,
                 "user_name": user_name,
                 "user_email": user_email,
                 "connected_at": datetime.now(timezone.utc).isoformat(),
+                "is_active": True,
             }
 
 
