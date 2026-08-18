@@ -232,10 +232,21 @@ def get_product_pending_report(
         for li in po.line_items:
             ordered = round(float(li.quantity or 0), 10)
             dispatched = round(float(li.delivered_quantity or 0), 10)
-            pending = round(max(0.0, ordered - dispatched), 10)
+            
+            if po.short_closed:
+                pending = 0.0
+            else:
+                pending = round(max(0.0, ordered - dispatched), 10)
+                
             rate = round(float(li.unit_price or 0), 10)
             pending_value = round(pending * rate, 10)
             
+            # Filter items based on active status
+            if po_status == "Pending" and pending <= 0:
+                continue
+            if po_status == "Completed" and pending > 0:
+                continue
+                
             product_type, size, size_label = parse_item_type_and_size(li.item)
             
             size_formatted = ""
