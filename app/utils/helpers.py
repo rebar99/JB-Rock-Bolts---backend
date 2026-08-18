@@ -40,7 +40,7 @@ def normalize_client_name(name: str) -> str:
     n = name.upper()
     n = n.replace("M/S.", "").replace("M/S", "").replace("LIMITED", "").replace("LTD.", "").replace("LTD", "")
     n = n.replace("PRIVATE", "").replace("PVT.", "").replace("PVT", "")
-    n = n.replace("PROJECTS", "").replace("PRODUCT", "")
+    n = n.replace("PROJECTS", "").replace("PROJECT", "").replace("PRODUCT", "")
     n = n.replace(".", "").replace(",", "").replace(" ", "").strip()
     return n
 
@@ -93,6 +93,7 @@ def dedupe_names_by_normalized_key(names, normalize_fn):
     return sorted(result, key=lambda s: s.lower())
 
 
+_REDUCER_SIZE_RE = re.compile(r"(\d+(?:\.\d+)?\s*[*xX/]\s*\d+(?:\.\d+)?)\s*mm", re.IGNORECASE)
 _DIA_RE = re.compile(r"(\d+(?:\.\d+)?)\s*mm", re.IGNORECASE)
 _PIPE_SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*NB", re.IGNORECASE)
 # Self-Drilling-Anchor system thread codes ("R32", "R51", ...) — a fixed
@@ -128,6 +129,7 @@ _KNOWN_PRODUCT_KEYWORDS = [
     ("sda nut", "SDA Nut"),
     ("sda plate", "SDA Plate"),
     ("sda coupler", "SDA Coupler"),
+    ("reducer", "Reducer Coupler"),
     ("coupler", "Coupler"),
     ("pipe", "Pipe"),
 ]
@@ -177,20 +179,25 @@ def parse_item_type_and_size(item_name: str) -> tuple:
         size = m.group(0).upper()
         remainder = working[:m.start()] + working[m.end():]
     else:
-        m = _DIA_RE.search(working)
+        m = _REDUCER_SIZE_RE.search(working)
         if m:
-            size = f"{m.group(1)}mm"
+            size = f"{m.group(1).replace(' ', '')}mm"
             remainder = working[:m.start()] + working[m.end():]
         else:
-            m = _PIPE_SIZE_RE.search(working)
+            m = _DIA_RE.search(working)
             if m:
-                size = f"{m.group(1)} NB"
+                size = f"{m.group(1)}mm"
                 remainder = working[:m.start()] + working[m.end():]
             else:
-                m = _BARE_NUMBER_RE.search(working)
+                m = _PIPE_SIZE_RE.search(working)
                 if m:
-                    size = m.group(1)
+                    size = f"{m.group(1)} NB"
                     remainder = working[:m.start()] + working[m.end():]
+                else:
+                    m = _BARE_NUMBER_RE.search(working)
+                    if m:
+                        size = m.group(1)
+                        remainder = working[:m.start()] + working[m.end():]
 
     remainder = _MAKE_SUFFIX_RE.sub("", remainder).strip()
     # Strip leftover punctuation/whitespace the size token left behind
