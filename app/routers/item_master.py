@@ -5,7 +5,7 @@ from typing import List, Optional
 from datetime import datetime
 from app.database import get_db
 from app.models.models import ItemMasterItem, ItemMasterSize, WOItemMasterItem, WOItemMasterSize
-from app.schemas.item_master import ItemMasterCreate, ItemMasterUpdate, ItemMasterOut, ItemMasterSizeCreate, ItemMasterSizeOut
+from app.schemas.item_master import ItemMasterCreate, ItemMasterUpdate, ItemMasterOut, ItemMasterSizeCreate, ItemMasterSizeOut, ItemMasterSizeUpdate
 from app.utils.auth import require_admin
 from app.utils.helpers import log_activity
 
@@ -156,6 +156,48 @@ def add_item_size(
     db.refresh(row)
 
     log_activity(db, f"Item Master Size Added ({payload.type})", SizeModel.__name__, f"Added size '{size}' to item '{item.name}'.", payload.created_by or "System", row.id, entity_name=f"{item.name} {size}")
+    return row
+
+
+@router.put("/{item_id}/sizes/{size_id}", response_model=ItemMasterSizeOut)
+def update_item_size(
+    item_id: int,
+    size_id: int,
+    payload: ItemMasterSizeUpdate,
+    authorization: str = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    require_admin(authorization, db, ACCESS_DENIED_DETAIL)
+
+    Model = WOItemMasterItem if payload.type == "WO" else ItemMasterItem
+    SizeModel = WOItemMasterSize if payload.type == "WO" else ItemMasterSize
+
+    item = db.get(Model, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found.")
+
+    row = db.query(SizeModel).filter(SizeModel.id == size_id, SizeModel.item_id == item_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Size not found.")
+
+    size = (payload.size or "").strip()
+    if not size:
+        raise HTTPException(status_code=400, detail="Size is required.")
+
+    existing = db.query(SizeModel).filter(
+        SizeModel.item_id == item_id,
+        func.lower(SizeModel.size) == size.lower(),
+        SizeModel.id != size_id,
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Size '{size}' already exists for '{item.name}'.")
+
+    old_size = row.size
+    row.size = size
+    db.commit()
+    db.refresh(row)
+
+    log_activity(db, f"Item Master Size Updated ({payload.type})", SizeModel.__name__, f"Updated size '{old_size}' to '{size}' for item '{item.name}'.", payload.updated_by or "System", row.id, entity_name=f"{item.name} {size}")
     return row
 
 
