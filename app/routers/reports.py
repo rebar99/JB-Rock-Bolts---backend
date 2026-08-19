@@ -247,20 +247,7 @@ def get_product_pending_report(
             if po_status == "Completed" and pending > 0:
                 continue
                 
-            product_type, size, size_label = parse_item_type_and_size(li.item)
-            
-            size_formatted = ""
-            if size:
-                s = size.upper()
-                if s.endswith("MM"):
-                    size_formatted = s[:-2].strip() + " MM"
-                else:
-                    size_formatted = s
-            
-            if size_formatted:
-                product_label = f"{size_formatted} {product_type}"
-            else:
-                product_label = product_type
+            product_label = li.item.strip() if li.item else "Uncategorized"
                 
             client_key = normalize_client_name(po.client_name) or (po.client_name or "")
             
