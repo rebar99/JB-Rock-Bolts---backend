@@ -210,6 +210,43 @@ def get_product_pending_report(
     po_status: str = Query("Pending"),
     db: Session = Depends(get_db)
 ):
+    from app.models.models import ItemMasterItem
+    from app.utils.helpers import parse_item_type_and_size
+    
+    master_items_query = db.query(ItemMasterItem.name).all()
+    master_names = sorted([m[0] for m in master_items_query if m[0]], key=len, reverse=True)
+    
+    def get_category_for_report(item_text):
+        item_lower = (item_text or "").strip().lower()
+        for name in master_names:
+            if item_lower.startswith(name.lower()):
+                return name
+        keyword_map = {
+            "micro piling": "JB 15 Micro pilling Tubes",
+            "micro pilling": "JB 15 Micro pilling Tubes",
+            "dcp anchor": "JB 10 DCP Anchors",
+            "anchor bolt": "JB 10 DCP Anchors",
+            "dome nut": "JB 10 DCP Anchors",
+            "doom nut": "JB 10 DCP Anchors",
+            "casing pipe": "JB 15 MS Casing Pipe",
+            "ms pipe": "JB 15 MS Casing Pipe",
+            "seamless carbon steel pipe": "JB 15 MS Casing Pipe",
+            "umbrella pipe": "JB 15 Umbrella Pipe/PipeRoofing",
+            "pipe roofing": "JB 15 Umbrella Pipe/PipeRoofing",
+            "bearing plate": "JB 16 Bearing Plates",
+            "soil nail": "JB 16 Slope Protection",
+            "wiremesh": "JB 17 Galvanised Wiremesh",
+            "wire mesh": "JB 17 Galvanised Wiremesh",
+            "coupler": "JB 19 REBAR COUPLERS",
+            "sda": "JB 17 Fully Threaded Bar",
+            "button bit": "JB 17 Fully Threaded Bar",
+            "bits": "JB 17 Fully Threaded Bar",
+        }
+        for keyword, mapped_name in keyword_map.items():
+            if keyword in item_lower:
+                return mapped_name
+        return "Uncategorized"
+        
     pos = db.query(PurchaseOrder).options(joinedload(PurchaseOrder.line_items)).all()
 
     raw_items = []
@@ -247,7 +284,14 @@ def get_product_pending_report(
             if po_status == "Completed" and pending > 0:
                 continue
                 
-            product_label = li.item.strip() if li.item else "Uncategorized"
+            raw_item = li.item.strip() if li.item else "Uncategorized"
+            base_cat = get_category_for_report(raw_item)
+            _, size_val, _ = parse_item_type_and_size(raw_item)
+            
+            if base_cat != "Uncategorized":
+                product_label = f"{base_cat} {size_val}" if size_val else base_cat
+            else:
+                product_label = raw_item
                 
             client_key = normalize_client_name(po.client_name) or (po.client_name or "")
             

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.database import get_db
-from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus
+from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus, ItemMasterItem
 from app.schemas.dashboard import DashboardStats, ChartData, ChartDataPoint, MonthlyTrend, RecentSale
 from app.utils.helpers import (
     compute_sale_taxable_and_gst, compute_sale_grand_total, normalize_client_name,
@@ -19,7 +19,7 @@ MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "O
 # x N products into an unreadable wall of bars — only the top N by revenue
 # get their own bar/color; anything past that simply isn't broken out on
 # this chart (no catch-all "Other Products" bucket).
-TOP_PRODUCTS_LIMIT = 8
+TOP_PRODUCTS_LIMIT = 15
 
 
 @router.get("/monthly-product-sales")
@@ -37,6 +37,43 @@ def get_monthly_product_sales(year: int = None, db: Session = Depends(get_db)):
 
     target_year = year or datetime.utcnow().year
 
+    master_items = db.query(ItemMasterItem.name).all()
+    master_names = sorted([m[0] for m in master_items if m[0]], key=len, reverse=True)
+
+    def get_category(item_text):
+        item_lower = (item_text or "").strip().lower()
+        for name in master_names:
+            if item_lower.startswith(name.lower()):
+                return name
+                
+        keyword_map = {
+            "micro piling": "JB 15 Micro pilling Tubes",
+            "micro pilling": "JB 15 Micro pilling Tubes",
+            "dcp anchor": "JB 10 DCP Anchors",
+            "anchor bolt": "JB 10 DCP Anchors",
+            "dome nut": "JB 10 DCP Anchors",
+            "doom nut": "JB 10 DCP Anchors",
+            "casing pipe": "JB 15 MS Casing Pipe",
+            "ms pipe": "JB 15 MS Casing Pipe",
+            "seamless carbon steel pipe": "JB 15 MS Casing Pipe",
+            "umbrella pipe": "JB 15 Umbrella Pipe/PipeRoofing",
+            "pipe roofing": "JB 15 Umbrella Pipe/PipeRoofing",
+            "bearing plate": "JB 16 Bearing Plates",
+            "soil nail": "JB 16 Slope Protection",
+            "wiremesh": "JB 17 Galvanised Wiremesh",
+            "wire mesh": "JB 17 Galvanised Wiremesh",
+            "coupler": "JB 19 REBAR COUPLERS",
+            "sda": "JB 17 Fully Threaded Bar",
+            "button bit": "JB 17 Fully Threaded Bar",
+            "bits": "JB 17 Fully Threaded Bar",
+        }
+        
+        for keyword, mapped_name in keyword_map.items():
+            if keyword in item_lower:
+                return mapped_name
+                
+        return "Uncategorized"
+
     sales = (
         db.query(Sale)
         .options(joinedload(Sale.items))
@@ -52,7 +89,7 @@ def get_monthly_product_sales(year: int = None, db: Session = Depends(get_db)):
             continue
         m_idx = s.created_at.month - 1
         for it in s.items:
-            product_type, _, _ = parse_item_type_and_size(it.item)
+            product_type = get_category(it.item)
             taxable, gst = compute_line_taxable_and_gst(it.quantity, it.unit_price, it.gst_rate)
             revenue = taxable + gst
             month_product_revenue[m_idx][product_type] = month_product_revenue[m_idx].get(product_type, 0.0) + revenue
@@ -162,14 +199,56 @@ def get_charts(db: Session = Depends(get_db)):
     item_taxable_expr = SaleItem.quantity * SaleItem.unit_price
     item_total_expr = item_taxable_expr + (item_taxable_expr * SaleItem.gst_rate / 100)
 
-    product_rows = (
+    master_items = db.query(ItemMasterItem.name).all()
+    master_names = sorted([m[0] for m in master_items if m[0]], key=len, reverse=True)
+
+    def get_category(item_text):
+        item_lower = (item_text or "").strip().lower()
+        for name in master_names:
+            if item_lower.startswith(name.lower()):
+                return name
+                
+        keyword_map = {
+            "micro piling": "JB 15 Micro pilling Tubes",
+            "micro pilling": "JB 15 Micro pilling Tubes",
+            "dcp anchor": "JB 10 DCP Anchors",
+            "anchor bolt": "JB 10 DCP Anchors",
+            "dome nut": "JB 10 DCP Anchors",
+            "doom nut": "JB 10 DCP Anchors",
+            "casing pipe": "JB 15 MS Casing Pipe",
+            "ms pipe": "JB 15 MS Casing Pipe",
+            "seamless carbon steel pipe": "JB 15 MS Casing Pipe",
+            "umbrella pipe": "JB 15 Umbrella Pipe/PipeRoofing",
+            "pipe roofing": "JB 15 Umbrella Pipe/PipeRoofing",
+            "bearing plate": "JB 16 Bearing Plates",
+            "soil nail": "JB 16 Slope Protection",
+            "wiremesh": "JB 17 Galvanised Wiremesh",
+            "wire mesh": "JB 17 Galvanised Wiremesh",
+            "coupler": "JB 19 REBAR COUPLERS",
+            "sda": "JB 17 Fully Threaded Bar",
+            "button bit": "JB 17 Fully Threaded Bar",
+            "bits": "JB 17 Fully Threaded Bar",
+        }
+        
+        for keyword, mapped_name in keyword_map.items():
+            if keyword in item_lower:
+                return mapped_name
+                
+        return "Uncategorized"
+
+    sales_items_raw = (
         db.query(SaleItem.item, func.sum(item_total_expr).label("total"))
         .group_by(SaleItem.item)
-        .order_by(func.sum(item_total_expr).desc())
-        .limit(10)
         .all()
     )
-    sales_by_product = [ChartDataPoint(name=r.item, value=float(r.total or 0)) for r in product_rows]
+    
+    product_totals = {}
+    for r in sales_items_raw:
+        cat = get_category(r.item)
+        product_totals[cat] = product_totals.get(cat, 0.0) + float(r.total or 0)
+        
+    ranked = sorted([ChartDataPoint(name=k, value=v) for k, v in product_totals.items()], key=lambda x: x.value, reverse=True)
+    sales_by_product = ranked[:10]
 
     # Payment Status distribution
     payment_rows = (

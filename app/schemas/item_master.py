@@ -21,6 +21,13 @@ class ItemMasterSizeCreate(BaseModel):
     created_by: Optional[str] = None
 
 
+class ItemMasterSizeUpdate(BaseModel):
+    size: str
+    type: Optional[str] = "PO"
+    updated_by: Optional[str] = None
+
+
+
 class ItemMasterSizeOut(BaseModel):
     id: int
     size: str
