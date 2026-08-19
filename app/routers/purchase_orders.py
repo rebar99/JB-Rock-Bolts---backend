@@ -387,6 +387,9 @@ def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, db: Session 
             for li_data in payload.line_items:
                 if li_data.id and li_data.id in existing_items:
                     li = existing_items[li_data.id]
+                    old_item_name = li.item
+                    new_item_name = li_data.item
+                    
                     li.item = li_data.item
                     li.quantity = li_data.quantity
                     li.uom = li_data.uom
@@ -395,6 +398,24 @@ def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, db: Session 
                     li.freight = li_data.freight
                     new_line_items.append(li)
                     del existing_items[li_data.id]
+                    
+                    if old_item_name != new_item_name:
+                        from app.models.models import SaleItem, SaleDispatch, SaleDispatchItem
+                        # Update linked SaleItems
+                        sale_items = db.query(SaleItem).filter(SaleItem.line_item_id == li.id).all()
+                        for si in sale_items:
+                            si.item = new_item_name
+                        
+                        # Update linked SaleDispatchItems
+                        sale_ids = [si.sale_id for si in sale_items]
+                        if sale_ids:
+                            dispatch_items = db.query(SaleDispatchItem)\
+                                .join(SaleDispatch)\
+                                .filter(SaleDispatch.sale_id.in_(sale_ids))\
+                                .filter(SaleDispatchItem.item == old_item_name)\
+                                .all()
+                            for di in dispatch_items:
+                                di.item = new_item_name
                 else:
                     new_li = POLineItem(
                         item=li_data.item,
