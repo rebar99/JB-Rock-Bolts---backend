@@ -206,12 +206,13 @@ def get_overview_report(db: Session = Depends(get_db)):
 @router.get("/product-pending", response_model=ProductPendingOut)
 def get_product_pending_report(
     client: str = Query("all"),
+    project: str = Query("all"),
     product: str = Query("all"),
     po_status: str = Query("Pending"),
     db: Session = Depends(get_db)
 ):
     from app.models.models import ItemMasterItem
-    from app.utils.helpers import parse_item_type_and_size
+    from app.utils.helpers import parse_item_type_and_size, dedupe_names_by_normalized_key, normalize_project_name
     
     master_items_query = db.query(ItemMasterItem.name).all()
     master_names = sorted([m[0] for m in master_items_query if m[0]], key=len, reverse=True)
@@ -252,6 +253,7 @@ def get_product_pending_report(
     raw_items = []
     distinct_clients = set()
     distinct_products = set()
+    client_projects_map = {}
 
     for po in pos:
         po_out = PurchaseOrderOut.model_validate(po)
@@ -294,15 +296,21 @@ def get_product_pending_report(
                 product_label = raw_item
                 
             client_key = normalize_client_name(po.client_name) or (po.client_name or "")
+            project_name = (po.project or "").strip()
             
             if po.client_name:
                 distinct_clients.add(po.client_name)
+                if project_name:
+                    client_projects_map.setdefault(po.client_name, set()).add(project_name)
             distinct_products.add(product_label)
             
             if client != "all" and normalize_client_name(po.client_name) != normalize_client_name(client):
                 continue
+            if project != "all" and normalize_project_name(project_name) != normalize_project_name(project):
+                continue
             if product != "all" and product_label.lower() != product.lower():
                 continue
+
                 
             raw_items.append({
                 "product_label": product_label,
@@ -310,6 +318,7 @@ def get_product_pending_report(
                 "client_key": client_key,
                 "po_number": po.po_number,
                 "po_date": po_date_str,
+                "project_name": po.project,
                 "ordered_qty": ordered,
                 "dispatched_qty": dispatched,
                 "pending_qty": pending,
@@ -356,6 +365,7 @@ def get_product_pending_report(
         po_entry = c_entry["pos_dict"].setdefault(pon, {
             "po_number": pon,
             "po_date": item["po_date"],
+            "project_name": item["project_name"],
             "ordered_qty": 0.0,
             "dispatched_qty": 0.0,
             "pending_qty": 0.0,
@@ -443,23 +453,31 @@ def get_product_pending_report(
     )
     
     products_list.sort(key=lambda x: x["product_label"].lower())
+    
+    # Process client_projects_map to deduplicate projects
+    client_projects = {
+        client_name: dedupe_names_by_normalized_key(list(projects), normalize_project_name)
+        for client_name, projects in client_projects_map.items()
+    }
 
     return ProductPendingOut(
         summary=summary,
         products=products_list,
         client_names=client_names_sorted,
-        product_labels=product_labels_sorted
+        product_labels=product_labels_sorted,
+        client_projects=client_projects
     )
 
 
 @router.get("/product-pending/export")
 def export_product_pending_report(
     client: str = Query("all"),
+    project: str = Query("all"),
     product: str = Query("all"),
     po_status: str = Query("Pending"),
     db: Session = Depends(get_db)
 ):
-    data = get_product_pending_report(client=client, product=product, po_status=po_status, db=db)
+    data = get_product_pending_report(client=client, project=project, product=product, po_status=po_status, db=db)
     
     from openpyxl import Workbook
     wb = Workbook()

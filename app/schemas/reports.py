@@ -178,6 +178,7 @@ class OverviewReportOut(BaseModel):
 class POPendingDetail(BaseModel):
     po_number: str
     po_date: Optional[str] = None
+    project_name: Optional[str] = None
     ordered_qty: float
     dispatched_qty: float
     pending_qty: float
@@ -213,4 +214,5 @@ class ProductPendingOut(BaseModel):
     products: List[ProductPendingRow]
     client_names: List[str]
     product_labels: List[str]
+    client_projects: Dict[str, List[str]] = {}
 
