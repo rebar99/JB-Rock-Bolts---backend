@@ -196,6 +196,7 @@ class ClientPendingDetail(BaseModel):
 
 class ProductPendingRow(BaseModel):
     product_label: str
+    category: str
     total_ordered_qty: float
     total_dispatched_qty: float
     pending_qty: float
