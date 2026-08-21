@@ -275,7 +275,7 @@ def get_product_pending_report(
             if po.short_closed:
                 pending = 0.0
             else:
-                pending = round(max(0.0, ordered - dispatched), 10)
+                pending = round(ordered - dispatched, 10)
                 
             rate = round(float(li.unit_price or 0), 10)
             pending_value = round(pending * rate, 10)
@@ -290,10 +290,7 @@ def get_product_pending_report(
             base_cat = get_category_for_report(raw_item)
             _, size_val, _ = parse_item_type_and_size(raw_item)
             
-            if base_cat != "Uncategorized":
-                product_label = f"{base_cat} {size_val}" if size_val else base_cat
-            else:
-                product_label = raw_item
+            product_label = raw_item
                 
             client_key = normalize_client_name(po.client_name) or (po.client_name or "")
             project_name = (po.project or "").strip()
@@ -314,6 +311,7 @@ def get_product_pending_report(
                 
             raw_items.append({
                 "product_label": product_label,
+                "category": base_cat,
                 "client_name": po.client_name,
                 "client_key": client_key,
                 "po_number": po.po_number,
@@ -334,6 +332,7 @@ def get_product_pending_report(
         
         p_entry = products_map.setdefault(pl, {
             "product_label": pl,
+            "category": item["category"],
             "total_ordered_qty": 0.0,
             "total_dispatched_qty": 0.0,
             "pending_qty": 0.0,
