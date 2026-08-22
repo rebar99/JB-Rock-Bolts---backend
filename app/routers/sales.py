@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Query
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date
 from decimal import Decimal
@@ -382,7 +383,14 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db)):
         created_by=payload.created_by,
     )
     db.add(sale)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invoice number already exists. Please choose a different invoice number."
+        )
 
     for item_data in payload.items:
         sale_item = SaleItem(
