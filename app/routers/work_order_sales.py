@@ -340,12 +340,20 @@ def create_work_order_sale(payload: WorkOrderSaleCreate, db: Session = Depends(g
             detail=f"Cannot create a dispatch or invoice against a {wo.status} Work Order."
         )
 
+    from datetime import date
+    if payload.invoice_date and payload.invoice_date < date(2026, 4, 1):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invoice Date cannot be before 1 April 2026."
+        )
+
     invoice_number = payload.invoice_number or generate_wo_invoice_number(db)
 
     sale = WorkOrderSale(
         wo_id=payload.wo_id,
         wo_number=payload.wo_number,
         invoice_number=invoice_number,
+        invoice_date=payload.invoice_date,
         client_name=payload.client_name,
         project=payload.project,
         subtotal=payload.subtotal,
@@ -451,6 +459,8 @@ def update_work_order_sale(sale_id: int, payload: WorkOrderSaleUpdate, db: Sessi
         raise HTTPException(status_code=404, detail="Work order sale not found.")
 
     updates = payload.model_dump(exclude_unset=True)
+    updated_by = updates.pop("updated_by", None)
+
     updated_by = updates.pop("updated_by", None)
 
     if "items" in updates:

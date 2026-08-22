@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
 from app.database import get_db
 from app.models.models import Client, PurchaseOrder, Record
-from app.schemas.client import ClientCreate, ClientOut, ClientStats
+from app.schemas.client import ClientCreate, ClientOut, ClientStats, MergeClientsRequest
 from app.utils.helpers import log_activity, normalize_client_name
 
 router = APIRouter(prefix="/api/clients", tags=["Clients"])
@@ -67,6 +67,15 @@ def list_clients(location: Optional[str] = None, db: Session = Depends(get_db)):
 
 @router.post("", response_model=ClientOut, status_code=status.HTTP_201_CREATED)
 def create_client(payload: ClientCreate, db: Session = Depends(get_db)):
+    new_norm = normalize_client_name(payload.name)
+    all_clients = db.query(Client).all()
+    for existing in all_clients:
+        if normalize_client_name(existing.name) == new_norm:
+            raise HTTPException(
+                status_code=400,
+                detail=f"A client with a similar name ({existing.name}) already exists. Please use it to avoid duplicates."
+            )
+
     client = Client(
         name=payload.name, 
         location=payload.location,
@@ -83,6 +92,75 @@ def create_client(payload: ClientCreate, db: Session = Depends(get_db)):
         order_count=0,
         total_purchases=0.0,
     )
+
+
+@router.post("/merge", status_code=status.HTTP_200_OK)
+def merge_clients(payload: MergeClientsRequest, db: Session = Depends(get_db)):
+    from app.models.models import PurchaseOrder, Sale, Record, WorkOrder, WorkOrderSale, Project
+    
+    master = db.get(Client, payload.master_id)
+    if not master:
+        raise HTTPException(status_code=404, detail="Master client not found.")
+
+    duplicates = db.query(Client).filter(Client.id.in_(payload.duplicate_ids)).all()
+    if not duplicates:
+        raise HTTPException(status_code=404, detail="No duplicate clients found.")
+
+    for duplicate in duplicates:
+        if duplicate.id == master.id:
+            continue
+            
+        # 1. Update Projects
+        db.query(Project).filter(Project.client_id == duplicate.id).update(
+            {"client_id": master.id}, synchronize_session=False
+        )
+
+        # 2. Update PurchaseOrders
+        db.query(PurchaseOrder).filter(
+            (PurchaseOrder.client_id == duplicate.id) | (func.lower(func.trim(PurchaseOrder.client_name)) == func.lower(duplicate.name.strip()))
+        ).update(
+            {"client_id": master.id, "client_name": master.name}, synchronize_session=False
+        )
+
+        # 3. Update Sales
+        db.query(Sale).filter(func.lower(func.trim(Sale.client_name)) == func.lower(duplicate.name.strip())).update(
+            {"client_name": master.name}, synchronize_session=False
+        )
+
+        # 4. Update Records
+        db.query(Record).filter(
+            (Record.client_id == duplicate.id) | (func.lower(func.trim(Record.client_name)) == func.lower(duplicate.name.strip()))
+        ).update(
+            {"client_id": master.id, "client_name": master.name}, synchronize_session=False
+        )
+
+        # 5. Update WorkOrders
+        db.query(WorkOrder).filter(
+            (WorkOrder.client_id == duplicate.id) | (func.lower(func.trim(WorkOrder.client_name)) == func.lower(duplicate.name.strip()))
+        ).update(
+            {"client_id": master.id, "client_name": master.name}, synchronize_session=False
+        )
+
+        # 6. Update WorkOrderSales
+        db.query(WorkOrderSale).filter(func.lower(func.trim(WorkOrderSale.client_name)) == func.lower(duplicate.name.strip())).update(
+            {"client_name": master.name}, synchronize_session=False
+        )
+
+        # Delete duplicate
+        db.delete(duplicate)
+
+        log_activity(
+            db, 
+            "Client Merged", 
+            "Client", 
+            f"Merged duplicate client '{duplicate.name}' into '{master.name}'.", 
+            payload.merged_by or "System",
+            master.id,
+            entity_name=master.name
+        )
+    
+    db.commit()
+    return {"message": f"Successfully merged into {master.name}"}
 
 
 @router.delete("/{client_id}", status_code=status.HTTP_204_NO_CONTENT)

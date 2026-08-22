@@ -26,6 +26,9 @@ from app.routers import work_orders
 from app.routers import work_order_reports
 from app.routers import work_order_sales
 from app.routers import item_master
+from app.routers import uom
+from app.routers import company_addresses
+from app.routers import system
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -61,6 +64,24 @@ async def lifespan(app: FastAPI):
             except Exception:
                 try:
                     conn.execute(text("ALTER TABLE purchase_orders ADD COLUMN project_id INT NULL"))
+                except Exception:
+                    pass
+
+            # Safely migrate sales.invoice_date
+            try:
+                conn.execute(text("SELECT invoice_date FROM sales LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("ALTER TABLE sales ADD COLUMN invoice_date DATE NULL"))
+                except Exception:
+                    pass
+
+            # Safely migrate work_order_sales.invoice_date
+            try:
+                conn.execute(text("SELECT invoice_date FROM work_order_sales LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("ALTER TABLE work_order_sales ADD COLUMN invoice_date DATE NULL"))
                 except Exception:
                     pass
 
@@ -245,6 +266,18 @@ async def lifespan(app: FastAPI):
     try:
         from app.services.seed import run_seed
         run_seed(db)
+        # On every server start, mark all previously "active" sessions as logged out.
+        # This prevents stale "Online" entries in History when the server was restarted
+        # and users didn't explicitly logout (SSE connection was cut by the restart).
+        from app.models.models import UserSession
+        from datetime import datetime, timezone
+        stale = db.query(UserSession).filter(UserSession.is_active == True).all()
+        for s in stale:
+            s.is_active = False
+            s.logout_at = datetime.now(timezone.utc)
+        db.commit()
+        if stale:
+            logger.info(f"Cleared {len(stale)} stale session(s) from previous server run.")
     finally:
         db.close()
 
@@ -292,6 +325,9 @@ app.include_router(work_orders.router)
 app.include_router(work_order_reports.router)
 app.include_router(work_order_sales.router)
 app.include_router(item_master.router)
+app.include_router(uom.router)
+app.include_router(company_addresses.router)
+app.include_router(system.router)
 
 
 @app.get("/", tags=["Health"])

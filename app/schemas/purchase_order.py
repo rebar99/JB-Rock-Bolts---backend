@@ -146,6 +146,8 @@ class PurchaseOrderOut(PurchaseOrderBase):
     @computed_field
     @property
     def pending_quantity(self) -> float:
+        if getattr(self, "short_closed", False):
+            return 0.0
         return round(max(0, self.total_quantity - self.delivered_quantity), 10)
 
     @computed_field

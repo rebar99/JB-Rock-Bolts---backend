@@ -82,3 +82,63 @@ def delete_project(project_id: int, deleted_by: Optional[str] = None, db: Sessio
     db.delete(project)
     db.commit()
     log_activity(db, "Project Deleted", "Project", f"Deleted project {name}.", deleted_by or "System", project_id, entity_name=name)
+
+
+from app.schemas.project import MergeProjectsRequest
+
+@router.post("/merge", status_code=status.HTTP_200_OK)
+def merge_projects(payload: MergeProjectsRequest, db: Session = Depends(get_db)):
+    from app.models.models import PurchaseOrder, Sale, WorkOrder, WorkOrderSale
+    from sqlalchemy import func
+    
+    master = db.get(Project, payload.master_id)
+    if not master:
+        raise HTTPException(status_code=404, detail="Master project not found.")
+
+    duplicates = db.query(Project).filter(Project.id.in_(payload.duplicate_ids)).all()
+    if not duplicates:
+        raise HTTPException(status_code=404, detail="No duplicate projects found.")
+
+    for duplicate in duplicates:
+        if duplicate.id == master.id:
+            continue
+
+        # Update PurchaseOrders
+        db.query(PurchaseOrder).filter(
+            (PurchaseOrder.project_id == duplicate.id) | (func.lower(func.trim(PurchaseOrder.project)) == func.lower(duplicate.name.strip()))
+        ).update(
+            {"project_id": master.id, "project": master.name}, synchronize_session=False
+        )
+
+        # Update Sales
+        db.query(Sale).filter(func.lower(func.trim(Sale.project)) == func.lower(duplicate.name.strip())).update(
+            {"project": master.name}, synchronize_session=False
+        )
+
+        # Update WorkOrders
+        db.query(WorkOrder).filter(
+            (WorkOrder.project_id == duplicate.id) | (func.lower(func.trim(WorkOrder.project)) == func.lower(duplicate.name.strip()))
+        ).update(
+            {"project_id": master.id, "project": master.name}, synchronize_session=False
+        )
+
+        # Update WorkOrderSales
+        db.query(WorkOrderSale).filter(func.lower(func.trim(WorkOrderSale.project)) == func.lower(duplicate.name.strip())).update(
+            {"project": master.name}, synchronize_session=False
+        )
+
+        # Delete duplicate
+        db.delete(duplicate)
+
+        log_activity(
+            db, 
+            "Project Merged", 
+            "Project", 
+            f"Merged duplicate project '{duplicate.name}' into '{master.name}'.", 
+            payload.merged_by or "System",
+            master.id,
+            entity_name=master.name
+        )
+    
+    db.commit()
+    return {"message": f"Successfully merged into {master.name}"}

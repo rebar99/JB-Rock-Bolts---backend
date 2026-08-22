@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.models import Client, Project, WorkOrder
+from app.database import get_db
+from app.models.models import Client, Project, WorkOrder, PurchaseOrder, UOMOption
 from app.utils.helpers import normalize_client_name, normalize_project_name, dedupe_names_by_normalized_key
 
 router = APIRouter(prefix="/api/constants", tags=["Constants"])
@@ -109,21 +110,32 @@ def get_constants(db: Session = Depends(get_db)):
 
     # Work Orders draw their "Name of Client" dropdown from clients that
     # actually have a Work Order on record — not the shared Clients master
-    # table `all_clients` uses, which also includes clients that only ever
-    # appeared on a Purchase Order. Selecting "Add New Client" still works
-    # for a brand-new client with no WO yet (it sets the form field
-    # directly rather than requiring the name to already be in this list).
+    # Work Order and Purchase Order specific clients
     wo_client_rows = db.query(WorkOrder.client_name).all()
     wo_clients = dedupe_names_by_normalized_key([c[0] for c in wo_client_rows], normalize_client_name)
+    
+    po_client_rows = db.query(PurchaseOrder.client_name).all()
+    po_clients = dedupe_names_by_normalized_key([c[0] for c in po_client_rows], normalize_client_name)
+
+    # UOM Options
+    db_uom = db.query(UOMOption.name).order_by(UOMOption.name).all()
+    if db_uom:
+        uom_options = [u[0] for u in db_uom]
+    else:
+        for u in UOM_OPTIONS:
+            db.add(UOMOption(name=u))
+        db.commit()
+        uom_options = UOM_OPTIONS
 
     return {
         "products": PRODUCTS,
-        "uom_options": UOM_OPTIONS,
+        "uom_options": uom_options,
         "locations": LOCATIONS,
         "projects": all_projects,
         "payment_terms": PAYMENT_TERMS,
         "clients": all_clients,
         "wo_clients": wo_clients,
+        "po_clients": po_clients,
         "payment_statuses": ["Pending", "Partial", "Paid"],
         "delivery_statuses": ["Not Delivered", "Delivered"],
         "inventory_statuses": ["In Stock", "Low Stock", "Out of Stock"],

@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, String, Float, Numeric, Text, DateTime, Boolean,
+    Column, Integer, String, Float, Numeric, Text, DateTime, Date, Boolean,
     ForeignKey, Enum, func,
 )
 from sqlalchemy.orm import relationship
@@ -62,11 +62,47 @@ class ItemMasterSize(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     item_id = Column(Integer, ForeignKey("item_master.id"), nullable=False)
-    size = Column(String(50), nullable=False)
+    size = Column(String(500), nullable=False)
     created_at = Column(DateTime, server_default=func.now())
     created_by = Column(String(100), nullable=True)
 
     item = relationship("ItemMasterItem", back_populates="sizes")
+
+
+class WOItemMasterItem(Base):
+    __tablename__ = "wo_item_master"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(300), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    updated_by = Column(String(100), nullable=True)
+
+    sizes = relationship("WOItemMasterSize", back_populates="item", cascade="all, delete-orphan", order_by="WOItemMasterSize.id")
+
+
+class WOItemMasterSize(Base):
+    __tablename__ = "wo_item_master_sizes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    item_id = Column(Integer, ForeignKey("wo_item_master.id"), nullable=False)
+    size = Column(String(50), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+
+    item = relationship("WOItemMasterItem", back_populates="sizes")
+
+
+class UOMOption(Base):
+    __tablename__ = "uom_options"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    updated_by = Column(String(100), nullable=True)
 
 
 class Client(Base):
@@ -328,6 +364,7 @@ class Sale(Base):
     po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=False)
     po_number = Column(String(100), nullable=False, index=True)
     invoice_number = Column(String(50), nullable=True, unique=True, index=True)
+    invoice_date = Column(Date, nullable=True)
     client_name = Column(String(200), nullable=False, index=True)
     project = Column(String(300), nullable=True)
     
@@ -662,6 +699,7 @@ class WorkOrderSale(Base):
     wo_id = Column(Integer, ForeignKey("work_orders.id"), nullable=False)
     wo_number = Column(String(100), nullable=False, index=True)
     invoice_number = Column(String(50), nullable=True, unique=True, index=True)
+    invoice_date = Column(Date, nullable=True)
     client_name = Column(String(200), nullable=False, index=True)
     project = Column(String(300), nullable=True)
 
@@ -809,3 +847,14 @@ class UserSession(Base):
     is_active = Column(Boolean, default=True, nullable=False)
 
     user_rel = relationship("User", foreign_keys=[user_id])
+
+
+class CompanyAddress(Base):
+    __tablename__ = "company_addresses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(200), nullable=False)
+    address_text = Column(Text, nullable=False)
+    is_default = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

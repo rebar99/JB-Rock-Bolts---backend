@@ -5,17 +5,27 @@ from typing import List, Optional
 
 class ItemMasterCreate(BaseModel):
     name: str
+    type: Optional[str] = "PO"
     created_by: Optional[str] = None
 
 
 class ItemMasterUpdate(BaseModel):
     name: str
+    type: Optional[str] = "PO"
     updated_by: Optional[str] = None
 
 
 class ItemMasterSizeCreate(BaseModel):
     size: str
+    type: Optional[str] = "PO"
     created_by: Optional[str] = None
+
+
+class ItemMasterSizeUpdate(BaseModel):
+    size: str
+    type: Optional[str] = "PO"
+    updated_by: Optional[str] = None
+
 
 
 class ItemMasterSizeOut(BaseModel):

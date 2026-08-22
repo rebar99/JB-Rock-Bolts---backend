@@ -61,6 +61,7 @@ class PendingPORow(BaseModel):
     po_number: str
     client_name: str
     project: str
+    invoice_number: Optional[str] = None
     item: str
     subtotal: float
     gst_amount: float
@@ -170,3 +171,49 @@ class OverviewReportOut(BaseModel):
     rows: List[OverviewRow]
     # source ("PO" | "WO") -> client_key -> deduped project names
     client_projects: Dict[str, Dict[str, List[str]]] = {}
+
+
+# ── Product-wise Pending Analysis schemas ────────────────────────────────────
+
+class POPendingDetail(BaseModel):
+    po_number: str
+    po_date: Optional[str] = None
+    project_name: Optional[str] = None
+    ordered_qty: float
+    dispatched_qty: float
+    pending_qty: float
+    rate: float
+    pending_value: float
+
+class ClientPendingDetail(BaseModel):
+    client_name: str
+    client_key: str
+    total_ordered_qty: float
+    total_dispatched_qty: float
+    pending_qty: float
+    pending_value: float
+    pos: List[POPendingDetail]
+
+class ProductPendingRow(BaseModel):
+    product_label: str
+    category: str
+    total_ordered_qty: float
+    total_dispatched_qty: float
+    pending_qty: float
+    pending_value: float
+    client_count: int
+    clients: List[ClientPendingDetail]
+
+class ProductPendingSummary(BaseModel):
+    total_pending_qty: float
+    total_pending_value: float
+    total_products: int
+    total_clients: int
+
+class ProductPendingOut(BaseModel):
+    summary: ProductPendingSummary
+    products: List[ProductPendingRow]
+    client_names: List[str]
+    product_labels: List[str]
+    client_projects: Dict[str, List[str]] = {}
+

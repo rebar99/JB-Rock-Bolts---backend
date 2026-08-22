@@ -11,6 +11,12 @@ class ClientCreate(BaseModel):
     created_by: Optional[str] = None
 
 
+class MergeClientsRequest(BaseModel):
+    master_id: int
+    duplicate_ids: List[int]
+    merged_by: Optional[str] = None
+
+
 class ClientOut(BaseModel):
     id: int
     name: str
