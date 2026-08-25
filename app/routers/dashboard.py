@@ -23,7 +23,7 @@ TOP_PRODUCTS_LIMIT = 15
 
 
 @router.get("/monthly-product-sales")
-def get_monthly_product_sales(year: int = None, db: Session = Depends(get_db)):
+def get_monthly_product_sales(year: int = None, month: int = None, gst: int = 1, db: Session = Depends(get_db)):
     """Grouped-bar data for the Dashboard's "Monthly Sales" chart — revenue
     per Product Type, per calendar month, sourced from Sale Invoice line
     items only (no dummy/static data). Product Type is derived from each
@@ -34,6 +34,7 @@ def get_monthly_product_sales(year: int = None, db: Session = Depends(get_db)):
     (0 where a month/product has no sales) so the X-axis never skips one.
     """
     from app.models.models import SaleItem
+    import calendar
 
     target_year = year or datetime.utcnow().year
 
@@ -74,38 +75,54 @@ def get_monthly_product_sales(year: int = None, db: Session = Depends(get_db)):
                 
         return "Uncategorized"
 
-    sales = (
+    sales_query = (
         db.query(Sale)
         .options(joinedload(Sale.items))
-        .filter(func.year(Sale.created_at) == target_year)
-        .all()
+        .filter(func.year(func.coalesce(Sale.invoice_date, Sale.created_at)) == target_year)
     )
+    if month:
+        sales_query = sales_query.filter(func.month(func.coalesce(Sale.invoice_date, Sale.created_at)) == month)
+        
+    sales = sales_query.all()
 
-    month_product_revenue = {m: {} for m in range(12)}
+    if month:
+        num_days = calendar.monthrange(target_year, month)[1]
+        time_labels = [str(d) for d in range(1, num_days + 1)]
+        time_product_revenue = {d - 1: {} for d in range(1, num_days + 1)}
+    else:
+        time_labels = MONTH_NAMES
+        time_product_revenue = {m: {} for m in range(12)}
+
     product_totals = {}
 
     for s in sales:
-        if not s.created_at:
+        dt = s.invoice_date if s.invoice_date else s.created_at
+        if not dt:
             continue
-        m_idx = s.created_at.month - 1
+            
+        if month:
+            t_idx = dt.day - 1
+        else:
+            t_idx = dt.month - 1
+            
         for it in s.items:
             product_type = get_category(it.item)
-            taxable, gst = compute_line_taxable_and_gst(it.quantity, it.unit_price, it.gst_rate)
-            revenue = taxable + gst
-            month_product_revenue[m_idx][product_type] = month_product_revenue[m_idx].get(product_type, 0.0) + revenue
+            taxable, gst_amt = compute_line_taxable_and_gst(it.quantity, it.unit_price, it.gst_rate)
+            revenue = taxable + gst_amt if gst == 1 else taxable
+            time_product_revenue[t_idx][product_type] = time_product_revenue[t_idx].get(product_type, 0.0) + revenue
             product_totals[product_type] = product_totals.get(product_type, 0.0) + revenue
 
     ranked_products = [p for p, _ in sorted(product_totals.items(), key=lambda kv: kv[1], reverse=True)]
     products = ranked_products[:TOP_PRODUCTS_LIMIT]
 
     data = []
-    for i, name in enumerate(MONTH_NAMES):
+    for i, name in enumerate(time_labels):
         row = {"month": name}
         for p in products:
-            row[p] = round(month_product_revenue[i].get(p, 0.0), 2)
+            row[p] = round(time_product_revenue[i].get(p, 0.0), 2)
         data.append(row)
 
-    return {"year": target_year, "months": MONTH_NAMES, "products": products, "data": data}
+    return {"year": target_year, "months": time_labels, "products": products, "data": data}
 
 
 @router.get("/clients", response_model=List[str])
@@ -123,7 +140,7 @@ def get_dashboard_clients(db: Session = Depends(get_db)):
 
 
 @router.get("/stats", response_model=DashboardStats)
-def get_stats(db: Session = Depends(get_db)):
+def get_stats(gst: int = 1, db: Session = Depends(get_db)):
     # Fetch every Sale exactly once (eager-loading items so Grand Total can be
     # computed fresh below without N+1 queries) and reuse this single fetch
     # for every metric that needs it. No separate aggregate query, no stored
@@ -138,7 +155,10 @@ def get_stats(db: Session = Depends(get_db)):
     total_revenue = 0.0
     for s in all_sales:
         taxable_amount, gst_amount = compute_sale_taxable_and_gst(s.items)
-        total_revenue += compute_sale_grand_total(taxable_amount, gst_amount, float(s.freight or 0))
+        if gst == 1:
+            total_revenue += compute_sale_grand_total(taxable_amount, gst_amount, float(s.freight or 0))
+        else:
+            total_revenue += taxable_amount + float(s.freight or 0)
     total_revenue = round(total_revenue, 2)
 
     # Total number of dispatches
@@ -189,7 +209,7 @@ def get_stats(db: Session = Depends(get_db)):
 
 
 @router.get("/charts", response_model=ChartData)
-def get_charts(db: Session = Depends(get_db)):
+def get_charts(year: int = None, month: int = None, gst: int = 1, db: Session = Depends(get_db)):
     from app.models.models import SaleItem
 
     # Same GST formula as everywhere else (Taxable Amount = quantity x
@@ -197,7 +217,7 @@ def get_charts(db: Session = Depends(get_db)):
     # it can be aggregated efficiently — never SaleItem.total_amount, which is
     # only a snapshot stored at the time the sale was created.
     item_taxable_expr = SaleItem.quantity * SaleItem.unit_price
-    item_total_expr = item_taxable_expr + (item_taxable_expr * SaleItem.gst_rate / 100)
+    item_total_expr = item_taxable_expr + (item_taxable_expr * SaleItem.gst_rate / 100) if gst == 1 else item_taxable_expr
 
     master_items = db.query(ItemMasterItem.name).all()
     master_names = sorted([m[0] for m in master_items if m[0]], key=len, reverse=True)
@@ -236,11 +256,17 @@ def get_charts(db: Session = Depends(get_db)):
                 
         return "Uncategorized"
 
-    sales_items_raw = (
+    target_year = year or datetime.utcnow().year
+
+    sales_items_query = (
         db.query(SaleItem.item, func.sum(item_total_expr).label("total"))
-        .group_by(SaleItem.item)
-        .all()
+        .join(Sale, Sale.id == SaleItem.sale_id)
+        .filter(func.year(func.coalesce(Sale.invoice_date, Sale.created_at)) == target_year)
     )
+    if month:
+        sales_items_query = sales_items_query.filter(func.month(func.coalesce(Sale.invoice_date, Sale.created_at)) == month)
+        
+    sales_items_raw = sales_items_query.group_by(SaleItem.item).all()
     
     product_totals = {}
     for r in sales_items_raw:
@@ -308,7 +334,7 @@ def get_charts(db: Session = Depends(get_db)):
 
 
 @router.get("/recent-sales", response_model=List[RecentSale])
-def get_recent_sales(limit: int = 6, db: Session = Depends(get_db)):
+def get_recent_sales(limit: int = 6, gst: int = 1, db: Session = Depends(get_db)):
     rows = (
         db.query(Sale)
         .order_by(Sale.created_at.desc())
@@ -318,7 +344,11 @@ def get_recent_sales(limit: int = 6, db: Session = Depends(get_db)):
     res = []
     for r in rows:
         # Calculate price from items + freight
-        items_sum = sum((float(it.subtotal or 0) + float(it.gst_amount or 0)) for it in r.items)
+        if gst == 1:
+            items_sum = sum((float(it.subtotal or 0) + float(it.gst_amount or 0)) for it in r.items)
+        else:
+            items_sum = sum(float(it.subtotal or 0) for it in r.items)
+            
         calc_price = items_sum + float(cast(Any, r.freight) or 0)
         
         # Delivery status logic: must have enough challans for all dispatch events
