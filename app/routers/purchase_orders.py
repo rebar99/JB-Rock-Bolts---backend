@@ -8,7 +8,8 @@ from app.models.models import PurchaseOrder, POLineItem
 from app.schemas.purchase_order import PurchaseOrderCreate, PurchaseOrderUpdate, PurchaseOrderOut, PurchaseOrderShortClose
 from app.schemas.bulk import BulkDeleteRequest, BulkDeleteResult
 from app.utils.helpers import log_activity, recalc_po_delivered_quantities, values_equal_for_update
-from app.utils.auth import require_admin
+from app.utils.auth import require_admin, get_user_id_from_token
+from app.models.models import User
 from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
     parse_optional_datetime, make_excel_response, style_header_row,
@@ -344,7 +345,7 @@ def get_purchase_order(po_id: int, opened_by: Optional[str] = None, db: Session 
 
 
 @router.put("/{po_id}", response_model=PurchaseOrderOut)
-def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, db: Session = Depends(get_db)):
+def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, authorization: str = Header(default=None), db: Session = Depends(get_db)):
     po = db.get(PurchaseOrder, po_id)
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found.")
@@ -379,6 +380,31 @@ def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, db: Session 
             (li_data.item, float(li_data.quantity or 0), li_data.uom, float(li_data.unit_price or 0), str(li_data.gst or ""), float(li_data.freight or 0))
             for li_data in payload.line_items
         ]
+        
+        quantity_changed = False
+        var_name = getattr(po, 'po_number', getattr(po, 'wo_number', 'unknown'))
+        existing_items_dict = {li.id: li for li in po.line_items if getattr(li, 'id', None)}
+        for li_data in payload.line_items:
+            if li_data.id and li_data.id in existing_items_dict:
+                if float(li_data.quantity or 0) != float(existing_items_dict[li_data.id].quantity):
+                    quantity_changed = True
+                    break
+            else:
+                quantity_changed = True
+                break
+                
+        if len(payload.line_items) != len(existing_items_dict):
+            quantity_changed = True
+            
+        if quantity_changed:
+            user_id = get_user_id_from_token(authorization) if authorization else None
+            user = db.get(User, user_id) if user_id else None
+            if not user or not user.is_admin:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only Admin can update PO quantity." if not False else "Only Admin can update Work Order quantity."
+                )
+
         if existing_signature != new_signature:
             changed_fields.append("line_items")
             existing_items = {li.id: li for li in po.line_items if getattr(li, 'id', None)}
@@ -389,6 +415,13 @@ def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, db: Session 
                     li = existing_items[li_data.id]
                     old_item_name = li.item
                     new_item_name = li_data.item
+                    
+                    if li_data.quantity < float(li.delivered_quantity or 0):
+                        db.rollback()
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Cannot reduce quantity below the dispatched amount ({li.delivered_quantity})."
+                        )
                     
                     li.item = li_data.item
                     li.quantity = li_data.quantity
@@ -567,3 +600,65 @@ def bulk_delete_purchase_orders(payload: BulkDeleteRequest, db: Session = Depend
         log_activity(db, "PO Deleted", "PurchaseOrder", f"Deleted PO {po_number}.", payload.deleted_by or "System", po_id, entity_name=po_number)
         deleted.append(po_id)
     return BulkDeleteResult(deleted=deleted, errors=errors)
+
+from pydantic import BaseModel
+
+class QuantityIncreaseItem_po(BaseModel):
+    line_item_id: int
+    additional_quantity: float
+    reason: str
+
+class QuantityIncreaseRequest_po(BaseModel):
+    items: list[QuantityIncreaseItem_po]
+
+@router.post("/{po_id}/increase-quantity", response_model=PurchaseOrderOut)
+def increase_po_quantity(
+    po_id: int,
+    payload: QuantityIncreaseRequest_po,
+    authorization: str = Header(default=None),
+    db: Session = Depends(get_db)
+):
+    admin = require_admin(authorization, db, "Only Admin can update PO quantity.")
+    po = db.get(PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(status_code=404, detail="PO not found.")
+        
+    if getattr(po, "short_closed", False) or getattr(po, "status", "") in ["Closed", "Cancelled", "Completed"]:
+        raise HTTPException(status_code=400, detail="Cannot update quantity for closed/completed PO.")
+
+    item_map = {li.id: li for li in po.line_items if li.id}
+    
+    logs = []
+    total_added = 0
+    for update_item in payload.items:
+        li = item_map.get(update_item.line_item_id)
+        if not li:
+            raise HTTPException(status_code=400, detail=f"Line item {update_item.line_item_id} not found.")
+            
+        old_qty = li.quantity
+        added_qty = update_item.additional_quantity
+        new_qty = old_qty + added_qty
+        
+        if new_qty < getattr(li, "delivered_quantity", 0):
+            raise HTTPException(status_code=400, detail=f"Cannot reduce below dispatched amount for item {li.item}.")
+            
+        li.quantity = new_qty
+        total_added += added_qty
+        logs.append(f"Item '{li.item}': {old_qty} -> {new_qty} (+{added_qty})")
+        
+    db.commit()
+    db.refresh(po)
+    
+    identifier = getattr(po, "po_number", getattr(po, "wo_number", str(po_id)))
+    
+    log_activity(
+        db,
+        action="Increase Quantity",
+        entity_type="PurchaseOrder",
+        details=f"Increased PO quantity. Reason: {payload.items[0].reason}. Changes: {'; '.join(logs)}",
+        user=admin.name,
+        entity_id=po_id,
+        entity_name=identifier
+    )
+    
+    return po

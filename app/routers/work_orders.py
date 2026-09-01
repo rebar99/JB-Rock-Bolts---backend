@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Query
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Query, Header
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from app.database import get_db
-from app.models.models import WorkOrder, WOLineItem
+from app.models.models import User, WorkOrder, WOLineItem
 from app.schemas.work_order import WorkOrderCreate, WorkOrderUpdate, WorkOrderOut, WorkOrderClose
 from app.schemas.bulk import BulkDeleteRequest, BulkDeleteResult
 from app.utils.helpers import log_activity, generate_wo_number, values_equal_for_update
@@ -336,7 +336,7 @@ def get_work_order(wo_id: int, opened_by: Optional[str] = None, db: Session = De
 
 
 @router.put("/{wo_id}", response_model=WorkOrderOut)
-def update_work_order(wo_id: int, payload: WorkOrderUpdate, db: Session = Depends(get_db)):
+def update_work_order(wo_id: int, payload: WorkOrderUpdate, authorization: str = Header(default=None), db: Session = Depends(get_db)):
     wo = db.get(WorkOrder, wo_id)
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found.")
@@ -371,6 +371,31 @@ def update_work_order(wo_id: int, payload: WorkOrderUpdate, db: Session = Depend
             (li_data.item, float(li_data.quantity or 0), li_data.uom, float(li_data.unit_price or 0), str(li_data.gst or ""), float(li_data.freight or 0))
             for li_data in payload.line_items
         ]
+        
+        quantity_changed = False
+        var_name = getattr(wo, 'po_number', getattr(wo, 'wo_number', 'unknown'))
+        existing_items_dict = {li.id: li for li in wo.line_items if getattr(li, 'id', None)}
+        for li_data in payload.line_items:
+            if li_data.id and li_data.id in existing_items_dict:
+                if float(li_data.quantity or 0) != float(existing_items_dict[li_data.id].quantity):
+                    quantity_changed = True
+                    break
+            else:
+                quantity_changed = True
+                break
+                
+        if len(payload.line_items) != len(existing_items_dict):
+            quantity_changed = True
+            
+        if quantity_changed:
+            user_id = get_user_id_from_token(authorization) if authorization else None
+            user = db.get(User, user_id) if user_id else None
+            if not user or not user.is_admin:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only Admin can update PO quantity." if not True else "Only Admin can update Work Order quantity."
+                )
+
         if existing_signature != new_signature:
             changed_fields.append("line_items")
             existing_items = {li.id: li for li in wo.line_items if getattr(li, 'id', None)}
@@ -383,6 +408,13 @@ def update_work_order(wo_id: int, payload: WorkOrderUpdate, db: Session = Depend
                     # payload here — it is derived exclusively from Work Order
                     # Sale dispatches via recalc_wo_completed_quantities, the
                     # same discipline as PurchaseOrder.delivered_quantity.
+                    if li_data.quantity < li.completed_quantity:
+                        db.rollback()
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Cannot reduce quantity below the dispatched amount ({li.completed_quantity})."
+                        )
+                    
                     li.item = li_data.item
                     li.quantity = li_data.quantity
                     li.uom = li_data.uom
@@ -533,3 +565,65 @@ def bulk_delete_work_orders(payload: BulkDeleteRequest, db: Session = Depends(ge
         log_activity(db, "WO Deleted", "WorkOrder", f"Deleted WO {wo_number}.", payload.deleted_by or "System", wo_id, entity_name=wo_number)
         deleted.append(wo_id)
     return BulkDeleteResult(deleted=deleted, errors=errors)
+
+from pydantic import BaseModel
+
+class QuantityIncreaseItem_wo(BaseModel):
+    line_item_id: int
+    additional_quantity: float
+    reason: str
+
+class QuantityIncreaseRequest_wo(BaseModel):
+    items: list[QuantityIncreaseItem_wo]
+
+@router.post("/{wo_id}/increase-quantity", response_model=WorkOrderOut)
+def increase_wo_quantity(
+    wo_id: int,
+    payload: QuantityIncreaseRequest_wo,
+    authorization: str = Header(default=None),
+    db: Session = Depends(get_db)
+):
+    admin = require_admin(authorization, db, "Only Admin can update Work Order quantity.")
+    wo = db.get(WorkOrder, wo_id)
+    if not wo:
+        raise HTTPException(status_code=404, detail="Work Order not found.")
+        
+    if getattr(wo, "short_closed", False) or getattr(wo, "status", "") in ["Closed", "Cancelled", "Completed"]:
+        raise HTTPException(status_code=400, detail="Cannot update quantity for closed/completed Work Order.")
+
+    item_map = {li.id: li for li in wo.line_items if li.id}
+    
+    logs = []
+    total_added = 0
+    for update_item in payload.items:
+        li = item_map.get(update_item.line_item_id)
+        if not li:
+            raise HTTPException(status_code=400, detail=f"Line item {update_item.line_item_id} not found.")
+            
+        old_qty = li.quantity
+        added_qty = update_item.additional_quantity
+        new_qty = old_qty + added_qty
+        
+        if new_qty < getattr(li, "completed_quantity", 0):
+            raise HTTPException(status_code=400, detail=f"Cannot reduce below dispatched amount for item {li.item}.")
+            
+        li.quantity = new_qty
+        total_added += added_qty
+        logs.append(f"Item '{li.item}': {old_qty} -> {new_qty} (+{added_qty})")
+        
+    db.commit()
+    db.refresh(wo)
+    
+    identifier = getattr(wo, "po_number", getattr(wo, "wo_number", str(wo_id)))
+    
+    log_activity(
+        db,
+        action="Increase Quantity",
+        entity_type="WorkOrder",
+        details=f"Increased Work Order quantity. Reason: {payload.items[0].reason}. Changes: {'; '.join(logs)}",
+        user=admin.name,
+        entity_id=wo_id,
+        entity_name=identifier
+    )
+    
+    return wo
