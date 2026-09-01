@@ -418,6 +418,15 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db)):
     db.flush()
     recalc_po_delivered_quantities(db, po)
 
+    if po.line_items:
+        for li in po.line_items:
+            if float(li.delivered_quantity or 0) > float(li.quantity or 0):
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot dispatch more than PO quantity. Item '{li.item}' has {float(li.quantity or 0):.2f} ordered but total dispatch would be {float(li.delivered_quantity or 0):.2f}."
+                )
+
     activity = SaleActivity(
         sale_id=sale.id,
         action="Sale Created",
