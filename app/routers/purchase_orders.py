@@ -8,7 +8,7 @@ from app.models.models import PurchaseOrder, POLineItem
 from app.schemas.purchase_order import PurchaseOrderCreate, PurchaseOrderUpdate, PurchaseOrderOut, PurchaseOrderShortClose
 from app.schemas.bulk import BulkDeleteRequest, BulkDeleteResult
 from app.utils.helpers import log_activity, recalc_po_delivered_quantities, values_equal_for_update
-from app.utils.auth import require_admin, get_user_id_from_token
+from app.utils.auth import require_admin, get_user_id_from_token, get_current_user
 from app.models.models import User
 from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
@@ -42,7 +42,7 @@ def _field(row: Dict[str, Any], keys):
 # ── File upload ───────────────────────────────────────────────────────────────
 
 @router.post("/upload")
-async def upload_po_file(file: UploadFile = File(...)):
+async def upload_po_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
     content = await read_upload_bytes(file)
     file_url = save_upload_bytes(content, file.filename)
     return {"file_url": file_url}
@@ -51,7 +51,7 @@ async def upload_po_file(file: UploadFile = File(...)):
 # ── Excel export ──────────────────────────────────────────────────────────────
 
 @router.get("/export")
-def export_purchase_orders(db: Session = Depends(get_db)):
+def export_purchase_orders(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Export all Purchase Orders to an Excel (.xlsx) file."""
     from openpyxl import Workbook
 
@@ -122,7 +122,7 @@ def export_purchase_orders(db: Session = Depends(get_db)):
 # ── Recalculate delivered_quantity for all line items ─────────────────────────
 
 @router.post("/recalculate-delivered")
-def recalculate_delivered_quantities(db: Session = Depends(get_db)):
+def recalculate_delivered_quantities(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Rebuild delivered_quantity for every PO/line item from actual SaleItem records.
 
     create_sale/update_sale/delete_sale now keep this in sync automatically after
@@ -150,6 +150,7 @@ async def import_purchase_orders(
     on_conflict: str = Query("skip", description="skip | update"),
     created_by: Optional[str] = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Import Purchase Orders from an Excel (.xlsx) or CSV file.
 
@@ -287,6 +288,7 @@ def list_purchase_orders(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     db.expire_all()
     q = db.query(PurchaseOrder)
@@ -301,7 +303,7 @@ def list_purchase_orders(
 
 
 @router.post("", response_model=PurchaseOrderOut, status_code=status.HTTP_201_CREATED)
-def create_purchase_order(payload: PurchaseOrderCreate, db: Session = Depends(get_db)):
+def create_purchase_order(payload: PurchaseOrderCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     data = payload.model_dump(exclude={"line_items"})
 
     if payload.line_items:

@@ -8,6 +8,7 @@ from app.models.models import User, WorkOrder, WOLineItem
 from app.schemas.work_order import WorkOrderCreate, WorkOrderUpdate, WorkOrderOut, WorkOrderClose
 from app.schemas.bulk import BulkDeleteRequest, BulkDeleteResult
 from app.utils.helpers import log_activity, generate_wo_number, values_equal_for_update
+from app.utils.auth import get_current_user, require_admin, get_user_id_from_token
 from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
     parse_optional_datetime, make_excel_response, style_header_row,
@@ -42,7 +43,7 @@ def _field(row: Dict[str, Any], keys):
 # ── File upload ───────────────────────────────────────────────────────────────
 
 @router.post("/upload")
-async def upload_wo_file(file: UploadFile = File(...)):
+async def upload_wo_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
     content = await read_upload_bytes(file)
     file_url = save_upload_bytes(content, file.filename)
     return {"file_url": file_url}
@@ -51,7 +52,7 @@ async def upload_wo_file(file: UploadFile = File(...)):
 # ── Auto WO number ───────────────────────────────────────────────────────────
 
 @router.get("/next-number")
-def next_wo_number(db: Session = Depends(get_db)):
+def next_wo_number(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return {"wo_number": generate_wo_number(db)}
 
 

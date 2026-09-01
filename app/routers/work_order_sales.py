@@ -13,7 +13,8 @@ from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
     parse_optional_datetime, make_excel_response, style_header_row,
 )
-from app.models.models import WorkOrderSale, WorkOrderSaleActivity, WorkOrder, WorkOrderSaleItem, WorkOrderSaleDispatch, WorkOrderSaleDispatchItem
+from app.models.models import User, WorkOrderSale, WorkOrderSaleActivity, WorkOrder, WorkOrderSaleItem, WorkOrderSaleDispatch, WorkOrderSaleDispatchItem
+from app.utils.auth import get_current_user
 from app.schemas.work_order_sale import (
     WorkOrderSaleCreate, WorkOrderSaleUpdate, WorkOrderSaleOut, WorkOrderSaleActivityCreate, WorkOrderSaleActivityOut, WorkOrderSaleItemCreate,
     WorkOrderSaleDispatchCreate, WorkOrderSaleDispatchOut,
