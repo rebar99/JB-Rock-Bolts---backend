@@ -1,15 +1,38 @@
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, List
+from fastapi import WebSocket
 
-# Map user_id to a list of asyncio.Queue (allow multiple tabs of the same user? The requirement says 1 user, but what if they have 2 tabs open? If they have multiple tabs, they should all get the alert, and the first to respond resolves it). Let's keep it simple: map user_id to a single Queue for now, assuming 1 tab for 1 active session.
-# Better: Set of queues
-from collections import defaultdict
+class ConnectionManager:
+    def __init__(self):
+        # user_id -> list of WebSockets
+        self.active_connections: Dict[int, List[WebSocket]] = {}
+        # request_id -> asyncio.Event
+        self.pending_login_events: Dict[str, asyncio.Event] = {}
+        # request_id -> result (True/False)
+        self.pending_login_results: Dict[str, bool] = {}
 
-active_connections = defaultdict(list)
-pending_logins = {}
+    async def connect(self, websocket: WebSocket, user_id: int):
+        await websocket.accept()
+        if user_id not in self.active_connections:
+            self.active_connections[user_id] = []
+        self.active_connections[user_id].append(websocket)
 
-async def notify_user(user_id: int, event_type: str, data: Any = None):
-    queues = active_connections.get(user_id, [])
-    for q in queues:
-        await q.put({"type": event_type, "data": data})
+    def disconnect(self, websocket: WebSocket, user_id: int):
+        if user_id in self.active_connections:
+            if websocket in self.active_connections[user_id]:
+                self.active_connections[user_id].remove(websocket)
+            if not self.active_connections[user_id]:
+                del self.active_connections[user_id]
 
+    def is_user_active(self, user_id: int) -> bool:
+        return user_id in self.active_connections and len(self.active_connections[user_id]) > 0
+
+    async def notify_user(self, user_id: int, message: dict):
+        if user_id in self.active_connections:
+            for connection in self.active_connections[user_id]:
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    pass
+
+manager = ConnectionManager()
