@@ -464,6 +464,15 @@ def update_work_order_sale(sale_id: int, payload: WorkOrderSaleUpdate, db: Sessi
 
     updated_by = updates.pop("updated_by", None)
 
+    # 1 Sale = 1 Delivery Challan — reject if a different challan URL is submitted
+    if "delivery_challan_url" in updates and updates["delivery_challan_url"]:
+        existing = sale.delivery_challan_url
+        if existing and existing.strip() and updates["delivery_challan_url"] != existing:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Delivery Challan already uploaded for this sale. Only one challan is allowed per sale.",
+            )
+
     if "items" in updates:
         new_items_data = updates.pop("items")
         wo = db.get(WorkOrder, sale.wo_id)
@@ -569,6 +578,14 @@ def mark_delivered(
     sale = db.get(WorkOrderSale, sale_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Work order sale not found.")
+
+    # 1 Sale = 1 Delivery Challan — reject if a different challan is being submitted
+    existing = sale.delivery_challan_url
+    if existing and existing.strip() and payload.delivery_challan_url and payload.delivery_challan_url != existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Delivery Challan already uploaded for this sale. Only one challan is allowed per sale.",
+        )
 
     challan_url = payload.delivery_challan_url or sale.delivery_challan_url
     if not challan_url:
