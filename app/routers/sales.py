@@ -418,6 +418,15 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db)):
     db.flush()
     recalc_po_delivered_quantities(db, po)
 
+    if po.line_items:
+        for li in po.line_items:
+            if float(li.delivered_quantity or 0) > float(li.quantity or 0):
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot dispatch more than PO quantity. Item '{li.item}' has {float(li.quantity or 0):.2f} ordered but total dispatch would be {float(li.delivered_quantity or 0):.2f}."
+                )
+
     activity = SaleActivity(
         sale_id=sale.id,
         action="Sale Created",
@@ -480,6 +489,15 @@ def update_sale(sale_id: int, payload: SaleUpdate, db: Session = Depends(get_db)
 
     updates = payload.model_dump(exclude_unset=True)
     updated_by = updates.pop("updated_by", None)
+
+    # 1 Sale = 1 Delivery Challan — reject if a different challan URL is submitted
+    if "delivery_challan_url" in updates and updates["delivery_challan_url"]:
+        existing = sale.delivery_challan_url
+        if existing and existing.strip() and updates["delivery_challan_url"] != existing:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Delivery Challan already uploaded for this sale. Only one challan is allowed per sale.",
+            )
 
     if "invoice_date" in updates:
         new_date = updates["invoice_date"]
@@ -598,6 +616,14 @@ def mark_delivered(
     sale = db.get(Sale, sale_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Sale not found.")
+
+    # 1 Sale = 1 Delivery Challan — reject if a different challan is being submitted
+    existing = sale.delivery_challan_url
+    if existing and existing.strip() and payload.delivery_challan_url and payload.delivery_challan_url != existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Delivery Challan already uploaded for this sale. Only one challan is allowed per sale.",
+        )
 
     challan_url = payload.delivery_challan_url or sale.delivery_challan_url
     if not challan_url:

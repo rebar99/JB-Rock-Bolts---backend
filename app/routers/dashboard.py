@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.database import get_db
-from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus, ItemMasterItem
+from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus, ItemMasterItem, User
+from app.utils.auth import get_current_user
 from app.schemas.dashboard import DashboardStats, ChartData, ChartDataPoint, MonthlyTrend, RecentSale
 from app.utils.helpers import (
     compute_sale_taxable_and_gst, compute_sale_grand_total, normalize_client_name,
@@ -23,7 +24,7 @@ TOP_PRODUCTS_LIMIT = 15
 
 
 @router.get("/monthly-product-sales")
-def get_monthly_product_sales(year: int = None, month: int = None, gst: int = 1, db: Session = Depends(get_db)):
+def get_monthly_product_sales(year: int = None, month: int = None, gst: int = 1, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Grouped-bar data for the Dashboard's "Monthly Sales" chart — revenue
     per Product Type, per calendar month, sourced from Sale Invoice line
     items only (no dummy/static data). Product Type is derived from each
@@ -126,7 +127,7 @@ def get_monthly_product_sales(year: int = None, month: int = None, gst: int = 1,
 
 
 @router.get("/clients", response_model=List[str])
-def get_dashboard_clients(db: Session = Depends(get_db)):
+def get_dashboard_clients(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Client names behind the "Total Clients" stat card — sourced from
     Purchase Orders only (same PurchaseOrder.client_name + normalize_client_name
     logic as the count in get_stats() below), so the dialog listing these

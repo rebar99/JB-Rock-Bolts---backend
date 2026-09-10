@@ -5,9 +5,10 @@ import uuid
 from datetime import datetime
 from io import BytesIO
 from typing import Any, Dict, List
-from fastapi import UploadFile
+from fastapi import UploadFile, HTTPException
 
 UPLOAD_DIR = "uploads"
+MAX_UPLOAD_SIZE = 1 * 1024 * 1024  # 1 MB
 
 
 def ensure_upload_dir(path: str) -> None:
@@ -16,7 +17,13 @@ def ensure_upload_dir(path: str) -> None:
 
 
 async def read_upload_bytes(file: UploadFile) -> bytes:
-    return await file.read()
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail="File too large! Maximum allowed size is 1 MB."
+        )
+    return content
 
 
 def save_upload_bytes(content: bytes, filename: str, subfolder: str = "") -> str:
