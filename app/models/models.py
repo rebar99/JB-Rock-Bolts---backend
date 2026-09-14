@@ -180,6 +180,12 @@ class PurchaseOrder(Base):
     last_updated_at = Column(DateTime, nullable=True)
     last_updated_by = Column(String(100), nullable=True)
 
+    # Soft-delete fields
+    is_deleted = Column(Boolean, default=False, nullable=False, server_default="0")
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_by = Column(String(100), nullable=True)
+    permanent_delete_at = Column(DateTime, nullable=True)
+
     client_rel = relationship("Client", back_populates="purchase_orders")
     project_rel = relationship("Project", back_populates="purchase_orders")
     sales = relationship("Sale", back_populates="purchase_order")
@@ -395,7 +401,13 @@ class Sale(Base):
     delivery_status = Column(String(50), nullable=False, default="Not Delivered", server_default="Not Delivered")
     delivery_challan_url = Column(String(500), nullable=True)
     hsn_code = Column(String(50), nullable=True)
-    
+
+    # Soft-delete fields
+    is_deleted = Column(Boolean, default=False, nullable=False, server_default="0")
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_by = Column(String(100), nullable=True)
+    permanent_delete_at = Column(DateTime, nullable=True)
+
     @property
     def invoice_urls(self) -> List[str]:
         return [url for url in (self.invoice_url or "").split(";") if url]
@@ -580,6 +592,12 @@ class WorkOrder(Base):
     last_updated_at = Column(DateTime, nullable=True)
     last_updated_by = Column(String(100), nullable=True)
 
+    # Soft-delete fields
+    is_deleted = Column(Boolean, default=False, nullable=False, server_default="0")
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_by = Column(String(100), nullable=True)
+    permanent_delete_at = Column(DateTime, nullable=True)
+
     client_rel = relationship("Client", back_populates="work_orders")
     project_rel = relationship("Project", back_populates="work_orders")
     line_items = relationship("WOLineItem", back_populates="work_order", cascade="all, delete-orphan", order_by="WOLineItem.id")
@@ -730,6 +748,10 @@ class WorkOrderSale(Base):
     delivery_status = Column(String(50), nullable=False, default="Not Delivered", server_default="Not Delivered")
     delivery_challan_url = Column(String(500), nullable=True)
     hsn_code = Column(String(50), nullable=True)
+    is_deleted = Column(Boolean, default=False, nullable=False, server_default="0")
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_by = Column(String(100), nullable=True)
+    permanent_delete_at = Column(DateTime, nullable=True)
 
     @property
     def invoice_urls(self) -> List[str]:

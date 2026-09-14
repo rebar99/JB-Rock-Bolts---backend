@@ -62,7 +62,7 @@ def list_sales(
     limit: int = 100,
     db: Session = Depends(get_db),
 ):
-    q = db.query(Sale)
+    q = db.query(Sale).filter(Sale.is_deleted == False)
     if po_id:
         q = q.filter(Sale.po_id == po_id)
     if client:
@@ -653,40 +653,51 @@ def mark_delivered(
 
 @router.delete("/{sale_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_sale(sale_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
+    from datetime import timezone, timedelta
     sale = db.get(Sale, sale_id)
     if not sale:
+        raise HTTPException(status_code=404, detail="Sale not found.")
+    if sale.is_deleted:
         raise HTTPException(status_code=404, detail="Sale not found.")
 
     po = db.get(PurchaseOrder, sale.po_id)
 
-    db.delete(sale)
+    now = datetime.utcnow()
+    sale.is_deleted = True
+    sale.deleted_at = now
+    sale.deleted_by = deleted_by or "System"
+    sale.permanent_delete_at = now + timedelta(hours=24)
+
     db.flush()
     if po:
         recalc_po_delivered_quantities(db, po)
     db.commit()
-    log_activity(db, "Sale Deleted", "Sale", f"Deleted sale invoice {sale.invoice_number} for {sale.client_name}.", deleted_by or "System", sale_id, entity_name=sale.invoice_number)
+    log_activity(db, "Sale Deleted", "Sale", f"Soft-deleted sale invoice {sale.invoice_number} for {sale.client_name}.", deleted_by or "System", sale_id, entity_name=sale.invoice_number)
 
 
 @router.post("/bulk-delete", response_model=BulkDeleteResult)
 def bulk_delete_sales(payload: BulkDeleteRequest, db: Session = Depends(get_db)):
-    """Delete many Sale invoices in one request — best-effort per id, mirrors
-    delete_sale (including the parent PO's delivered-quantity recalculation).
-    """
+    """Soft-delete many Sale invoices in one request."""
+    from datetime import timezone, timedelta
     deleted: list[int] = []
     errors: list[str] = []
+    now = datetime.utcnow()
     for sale_id in payload.ids:
         sale = db.get(Sale, sale_id)
-        if not sale:
+        if not sale or sale.is_deleted:
             errors.append(f"Sale {sale_id}: not found")
             continue
         po = db.get(PurchaseOrder, sale.po_id)
         invoice_number, client_name = sale.invoice_number, sale.client_name
-        db.delete(sale)
+        sale.is_deleted = True
+        sale.deleted_at = now
+        sale.deleted_by = payload.deleted_by or "System"
+        sale.permanent_delete_at = now + timedelta(hours=24)
         db.flush()
         if po:
             recalc_po_delivered_quantities(db, po)
         db.commit()
-        log_activity(db, "Sale Deleted", "Sale", f"Deleted sale invoice {invoice_number} for {client_name}.", payload.deleted_by or "System", sale_id, entity_name=invoice_number)
+        log_activity(db, "Sale Deleted", "Sale", f"Soft-deleted sale invoice {invoice_number} for {client_name}.", payload.deleted_by or "System", sale_id, entity_name=invoice_number)
         deleted.append(sale_id)
     return BulkDeleteResult(deleted=deleted, errors=errors)
 

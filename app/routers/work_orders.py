@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile,
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from app.database import get_db
 from app.models.models import User, WorkOrder, WOLineItem
 from app.schemas.work_order import WorkOrderCreate, WorkOrderUpdate, WorkOrderOut, WorkOrderClose
@@ -277,7 +277,7 @@ def list_work_orders(
     db: Session = Depends(get_db),
 ):
     db.expire_all()
-    q = db.query(WorkOrder)
+    q = db.query(WorkOrder).filter(WorkOrder.is_deleted == False)
     if search:
         q = q.filter(
             (WorkOrder.wo_number.ilike(f"%{search}%")) |
@@ -511,59 +511,54 @@ def close_work_order(wo_id: int, payload: WorkOrderClose, db: Session = Depends(
 
 @router.delete("/{wo_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_work_order(wo_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
+    from datetime import timedelta
     wo = db.get(WorkOrder, wo_id)
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found.")
+    if wo.is_deleted:
+        raise HTTPException(status_code=404, detail="Work order not found.")
 
     wo_number = wo.wo_number
-    # Deleting a WO cascades to any linked WO Sales/Invoices — each is
-    # deleted (and logged) individually first, mirroring the PO delete flow.
-    for sale in list(wo.work_order_sales):
-        sale_id, invoice_number, client_name = sale.id, sale.invoice_number, sale.client_name
-        db.delete(sale)
-        db.flush()
-        log_activity(
-            db, "WO Sale Deleted", "WorkOrderSale",
-            f"Deleted sale invoice {invoice_number} for {client_name} (cascaded from WO {wo_number} deletion).",
-            deleted_by or "System", sale_id, entity_name=invoice_number,
+    # Check for active (non-deleted) linked WO Sales
+    active_wo_sales = [s for s in wo.work_order_sales if not getattr(s, 'is_deleted', False)]
+    if active_wo_sales:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete Work Order: Please delete the associated WO Sales/Invoices first."
         )
 
-    db.delete(wo)
+    now = datetime.utcnow()
+    wo.is_deleted = True
+    wo.deleted_at = now
+    wo.deleted_by = deleted_by or "System"
+    wo.permanent_delete_at = now + timedelta(hours=24)
     db.commit()
-    log_activity(db, "WO Deleted", "WorkOrder", f"Deleted WO {wo_number}.", deleted_by or "System", wo_id, entity_name=wo_number)
+    log_activity(db, "WO Deleted", "WorkOrder", f"Soft-deleted WO {wo_number}.", deleted_by or "System", wo_id, entity_name=wo_number)
 
 
 @router.post("/bulk-delete", response_model=BulkDeleteResult)
 def bulk_delete_work_orders(payload: BulkDeleteRequest, db: Session = Depends(get_db)):
-    """Delete many Work Orders in one request — best-effort per id. Mirrors
-    delete_work_order's cascade: linked WO Sales are deleted (and logged)
-    before the WO itself.
-    """
+    """Soft-delete many Work Orders in one request — best-effort per id."""
+    from datetime import timedelta
     deleted: list[int] = []
     errors: list[str] = []
+    now = datetime.utcnow()
     for wo_id in payload.ids:
         wo = db.get(WorkOrder, wo_id)
-        if not wo:
+        if not wo or wo.is_deleted:
             errors.append(f"WO {wo_id}: not found")
             continue
         wo_number = wo.wo_number
-        try:
-            for sale in list(wo.work_order_sales):
-                sale_id, invoice_number, client_name = sale.id, sale.invoice_number, sale.client_name
-                db.delete(sale)
-                db.flush()
-                log_activity(
-                    db, "WO Sale Deleted", "WorkOrderSale",
-                    f"Deleted sale invoice {invoice_number} for {client_name} (cascaded from WO {wo_number} bulk deletion).",
-                    payload.deleted_by or "System", sale_id, entity_name=invoice_number,
-                )
-            db.delete(wo)
-            db.commit()
-        except IntegrityError:
-            db.rollback()
-            errors.append(f"WO {wo_number}: database constraint prevented deletion")
+        active_wo_sales = [s for s in wo.work_order_sales if not getattr(s, 'is_deleted', False)]
+        if active_wo_sales:
+            errors.append(f"WO {wo_number}: Cannot delete Work Order because it has associated WO Sales/Invoices. Please delete them first.")
             continue
-        log_activity(db, "WO Deleted", "WorkOrder", f"Deleted WO {wo_number}.", payload.deleted_by or "System", wo_id, entity_name=wo_number)
+        wo.is_deleted = True
+        wo.deleted_at = now
+        wo.deleted_by = payload.deleted_by or "System"
+        wo.permanent_delete_at = now + timedelta(hours=24)
+        db.commit()
+        log_activity(db, "WO Deleted", "WorkOrder", f"Soft-deleted WO {wo_number}.", payload.deleted_by or "System", wo_id, entity_name=wo_number)
         deleted.append(wo_id)
     return BulkDeleteResult(deleted=deleted, errors=errors)
 

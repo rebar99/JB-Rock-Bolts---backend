@@ -5,6 +5,7 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone, timedelta
 
 from app.config import settings
 from app.database import create_database_if_not_exists, engine, SessionLocal, Base
@@ -29,6 +30,7 @@ from app.routers import item_master
 from app.routers import uom
 from app.routers import company_addresses
 from app.routers import system
+from app.routers import recently_deleted
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -259,6 +261,22 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     pass
 
+            # ── Soft-delete columns for recently deleted feature ────────────────
+            for tbl in ["sales", "purchase_orders", "work_orders", "work_order_sales"]:
+                for col, dtype in [
+                    ("is_deleted", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                    ("deleted_at", "DATETIME NULL"),
+                    ("deleted_by", "VARCHAR(100) NULL"),
+                    ("permanent_delete_at", "DATETIME NULL"),
+                ]:
+                    try:
+                        conn.execute(text(f"SELECT {col} FROM {tbl} LIMIT 1"))
+                    except Exception:
+                        try:
+                            conn.execute(text(f"ALTER TABLE {tbl} ADD COLUMN {col} {dtype}"))
+                        except Exception:
+                            pass
+
     except Exception as e:
         logger.error(f"Error applying schema updates: {e}")
 
@@ -270,7 +288,6 @@ async def lifespan(app: FastAPI):
         # This prevents stale "Online" entries in History when the server was restarted
         # and users didn't explicitly logout (SSE connection was cut by the restart).
         from app.models.models import UserSession
-        from datetime import datetime, timezone
         stale = db.query(UserSession).filter(UserSession.is_active == True).all()
         for s in stale:
             s.is_active = False
@@ -281,7 +298,109 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    # ── APScheduler: auto-purge soft-deleted records after 24 hours ────────────
+    def purge_expired_deleted_records():
+        """Har 1 ghante mein check karo — jis record ka permanent_delete_at past mein
+        aa gaya, usse permanently delete karo (including associated files)."""
+        from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale
+        db_purge = SessionLocal()
+        try:
+            now_naive = datetime.utcnow()
+
+            # Purge expired Sales
+            expired_sales = db_purge.query(Sale).filter(
+                Sale.is_deleted == True,
+                Sale.permanent_delete_at <= now_naive,
+            ).all()
+            for s in expired_sales:
+                logger.info(f"[AutoPurge] Permanently deleting Sale id={s.id} invoice={s.invoice_number}")
+                for url_field in filter(None, [s.invoice_url, s.e_way_bill_url, s.delivery_challan_url]):
+                    for url in url_field.split(";"):
+                        if url and url.strip():
+                            file_path = url.strip().lstrip("/")
+                            if os.path.exists(file_path):
+                                try:
+                                    os.remove(file_path)
+                                except Exception:
+                                    pass
+                db_purge.delete(s)
+            db_purge.flush()
+
+            # Purge expired Purchase Orders
+            expired_pos = db_purge.query(PurchaseOrder).filter(
+                PurchaseOrder.is_deleted == True,
+                PurchaseOrder.permanent_delete_at <= now_naive,
+            ).all()
+            for po in expired_pos:
+                logger.info(f"[AutoPurge] Permanently deleting PO id={po.id} po_number={po.po_number}")
+                if po.file_url:
+                    for url in po.file_url.split(";"):
+                        if url and url.strip():
+                            file_path = url.strip().lstrip("/")
+                            if os.path.exists(file_path):
+                                try:
+                                    os.remove(file_path)
+                                except Exception:
+                                    pass
+                db_purge.delete(po)
+            db_purge.flush()
+
+            # Purge expired Work Orders
+            expired_wos = db_purge.query(WorkOrder).filter(
+                WorkOrder.is_deleted == True,
+                WorkOrder.permanent_delete_at <= now_naive,
+            ).all()
+            for wo in expired_wos:
+                logger.info(f"[AutoPurge] Permanently deleting WO id={wo.id} wo_number={wo.wo_number}")
+                if wo.file_url:
+                    for url in wo.file_url.split(";"):
+                        if url and url.strip():
+                            file_path = url.strip().lstrip("/")
+                            if os.path.exists(file_path):
+                                try:
+                                    os.remove(file_path)
+                                except Exception:
+                                    pass
+                db_purge.delete(wo)
+            db_purge.flush()
+
+            # Purge expired Work Order Sales
+            expired_wo_sales = db_purge.query(WorkOrderSale).filter(
+                WorkOrderSale.is_deleted == True,
+                WorkOrderSale.permanent_delete_at <= now_naive,
+            ).all()
+            for wos in expired_wo_sales:
+                logger.info(f"[AutoPurge] Permanently deleting WO Sale id={wos.id} invoice={wos.invoice_number}")
+                for url_field in filter(None, [wos.invoice_url, wos.e_way_bill_url, wos.delivery_challan_url]):
+                    for url in url_field.split(";"):
+                        if url and url.strip():
+                            file_path = url.strip().lstrip("/")
+                            if os.path.exists(file_path):
+                                try:
+                                    os.remove(file_path)
+                                except Exception:
+                                    pass
+                db_purge.delete(wos)
+            db_purge.flush()
+
+            db_purge.commit()
+            total = len(expired_sales) + len(expired_pos) + len(expired_wos) + len(expired_wo_sales)
+            if total:
+                logger.info(f"[AutoPurge] Purged {total} expired soft-deleted record(s).")
+        except Exception as ex:
+            db_purge.rollback()
+            logger.error(f"[AutoPurge] Error during purge: {ex}")
+        finally:
+            db_purge.close()
+
+    from apscheduler.schedulers.background import BackgroundScheduler
+    _scheduler = BackgroundScheduler()
+    _scheduler.add_job(purge_expired_deleted_records, "interval", hours=1, id="purge_deleted")
+    _scheduler.start()
+    logger.info("[AutoPurge] APScheduler started — purge job runs every hour.")
+
     yield
+    _scheduler.shutdown(wait=False)
     logger.info("Shutting down JB Rock Bolts API.")
 
 
@@ -328,6 +447,7 @@ app.include_router(item_master.router)
 app.include_router(uom.router)
 app.include_router(company_addresses.router)
 app.include_router(system.router)
+app.include_router(recently_deleted.router)
 
 
 @app.get("/", tags=["Health"])

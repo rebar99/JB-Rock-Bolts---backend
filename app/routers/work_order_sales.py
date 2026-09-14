@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Query
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pydantic import BaseModel
 from app.database import get_db
@@ -62,7 +62,7 @@ def list_work_order_sales(
     limit: int = 100,
     db: Session = Depends(get_db),
 ):
-    q = db.query(WorkOrderSale)
+    q = db.query(WorkOrderSale).filter(WorkOrderSale.is_deleted == False)
     if wo_id:
         q = q.filter(WorkOrderSale.wo_id == wo_id)
     if client:
@@ -86,7 +86,7 @@ def export_work_order_sales(db: Session = Depends(get_db)):
     """Export all Work Order Sales / Invoices to an Excel (.xlsx) file."""
     from openpyxl import Workbook
 
-    sales = db.query(WorkOrderSale).options(joinedload(WorkOrderSale.items)).order_by(WorkOrderSale.created_at.desc()).all()
+    sales = db.query(WorkOrderSale).filter(WorkOrderSale.is_deleted == False).options(joinedload(WorkOrderSale.items)).order_by(WorkOrderSale.created_at.desc()).all()
 
     wb = Workbook()
     ws = wb.active
@@ -618,38 +618,45 @@ def delete_work_order_sale(sale_id: int, deleted_by: Optional[str] = None, db: S
     sale = db.get(WorkOrderSale, sale_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Work order sale not found.")
+    if sale.is_deleted:
+        raise HTTPException(status_code=404, detail="Work order sale not found.")
+
+    now = datetime.utcnow()
+    sale.is_deleted = True
+    sale.deleted_at = now
+    sale.deleted_by = deleted_by or "System"
+    sale.permanent_delete_at = now + timedelta(hours=24)
+    db.flush()
 
     wo = db.get(WorkOrder, sale.wo_id)
-
-    db.delete(sale)
-    db.flush()
     if wo:
         recalc_wo_completed_quantities(db, wo)
     db.commit()
-    log_activity(db, "WO Sale Deleted", "WorkOrderSale", f"Deleted sale invoice {sale.invoice_number} for {sale.client_name}.", deleted_by or "System", sale_id, entity_name=sale.invoice_number)
+    log_activity(db, "WO Sale Deleted", "WorkOrderSale", f"Soft-deleted sale invoice {sale.invoice_number} for {sale.client_name}.", deleted_by or "System", sale_id, entity_name=sale.invoice_number)
 
 
 @router.post("/bulk-delete", response_model=BulkDeleteResult)
 def bulk_delete_work_order_sales(payload: BulkDeleteRequest, db: Session = Depends(get_db)):
-    """Delete many WO Sale invoices in one request — best-effort per id,
-    mirrors delete_work_order_sale (including the parent WO's completed-
-    quantity recalculation).
-    """
+    """Soft-delete many WO Sale invoices in one request — best-effort per id."""
     deleted: list[int] = []
     errors: list[str] = []
+    now = datetime.utcnow()
     for sale_id in payload.ids:
         sale = db.get(WorkOrderSale, sale_id)
-        if not sale:
+        if not sale or sale.is_deleted:
             errors.append(f"WO Sale {sale_id}: not found")
             continue
         wo = db.get(WorkOrder, sale.wo_id)
         invoice_number, client_name = sale.invoice_number, sale.client_name
-        db.delete(sale)
+        sale.is_deleted = True
+        sale.deleted_at = now
+        sale.deleted_by = payload.deleted_by or "System"
+        sale.permanent_delete_at = now + timedelta(hours=24)
         db.flush()
         if wo:
             recalc_wo_completed_quantities(db, wo)
         db.commit()
-        log_activity(db, "WO Sale Deleted", "WorkOrderSale", f"Deleted sale invoice {invoice_number} for {client_name}.", payload.deleted_by or "System", sale_id, entity_name=invoice_number)
+        log_activity(db, "WO Sale Deleted", "WorkOrderSale", f"Soft-deleted sale invoice {invoice_number} for {client_name}.", payload.deleted_by or "System", sale_id, entity_name=invoice_number)
         deleted.append(sale_id)
     return BulkDeleteResult(deleted=deleted, errors=errors)
 

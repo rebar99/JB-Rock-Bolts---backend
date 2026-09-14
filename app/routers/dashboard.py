@@ -79,6 +79,7 @@ def get_monthly_product_sales(year: int = None, month: int = None, gst: int = 1,
     sales_query = (
         db.query(Sale)
         .options(joinedload(Sale.items))
+        .filter(Sale.is_deleted == False)
         .filter(func.year(func.coalesce(Sale.invoice_date, Sale.created_at)) == target_year)
     )
     if month:
@@ -136,7 +137,7 @@ def get_dashboard_clients(db: Session = Depends(get_db), current_user: User = De
     added via Work Orders or the "Add New Client" dialog but never used on
     a PO).
     """
-    all_po_clients = db.query(PurchaseOrder.client_name).all()
+    all_po_clients = db.query(PurchaseOrder.client_name).filter(PurchaseOrder.is_deleted == False).all()
     return dedupe_names_by_normalized_key([c[0] for c in all_po_clients], normalize_client_name)
 
 
@@ -146,7 +147,7 @@ def get_stats(gst: int = 1, db: Session = Depends(get_db)):
     # computed fresh below without N+1 queries) and reuse this single fetch
     # for every metric that needs it. No separate aggregate query, no stored
     # dashboard total, no join that could duplicate a row.
-    all_sales = db.query(Sale).options(joinedload(Sale.items)).all()
+    all_sales = db.query(Sale).options(joinedload(Sale.items)).filter(Sale.is_deleted == False).all()
 
     # Total revenue: computed with the exact same formula as the Sales Report
     # (Taxable Amount + GST from each sale's own line items, then + Freight),
@@ -165,7 +166,7 @@ def get_stats(gst: int = 1, db: Session = Depends(get_db)):
     # Total number of dispatches
     total_orders = len(all_sales)
     # Total unique clients with smart normalization (ignores M/s, LTD, LIMITED, casing)
-    all_po_clients = db.query(PurchaseOrder.client_name).all()
+    all_po_clients = db.query(PurchaseOrder.client_name).filter(PurchaseOrder.is_deleted == False).all()
     normalized_names = set()
     for row in all_po_clients:
         n = normalize_client_name(row.client_name)
@@ -196,6 +197,7 @@ def get_stats(gst: int = 1, db: Session = Depends(get_db)):
     
     # Payments that are not fully paid
     pending_payments = db.query(func.count(Sale.id)).filter(
+        Sale.is_deleted == False,
         Sale.payment_status.in_([PaymentStatus.PENDING, PaymentStatus.PARTIAL])
     ).scalar() or 0
 
@@ -262,6 +264,7 @@ def get_charts(year: int = None, month: int = None, gst: int = 1, db: Session = 
     sales_items_query = (
         db.query(SaleItem.item, func.sum(item_total_expr).label("total"))
         .join(Sale, Sale.id == SaleItem.sale_id)
+        .filter(Sale.is_deleted == False)
         .filter(func.year(func.coalesce(Sale.invoice_date, Sale.created_at)) == target_year)
     )
     if month:
@@ -280,6 +283,7 @@ def get_charts(year: int = None, month: int = None, gst: int = 1, db: Session = 
     # Payment Status distribution
     payment_rows = (
         db.query(Sale.payment_status, func.count(Sale.id).label("cnt"))
+        .filter(Sale.is_deleted == False)
         .group_by(Sale.payment_status)
         .all()
     )
@@ -303,6 +307,7 @@ def get_charts(year: int = None, month: int = None, gst: int = 1, db: Session = 
             func.min(Sale.created_at).label("sort_date")
         )
         .join(SaleItem, Sale.id == SaleItem.sale_id)
+        .filter(Sale.is_deleted == False)
         .group_by(func.date_format(Sale.created_at, "%b %Y"))
         .all()
     )
@@ -312,6 +317,7 @@ def get_charts(year: int = None, month: int = None, gst: int = 1, db: Session = 
             func.date_format(Sale.created_at, "%b %Y").label("month"),
             func.sum(Sale.freight).label("freight_total")
         )
+        .filter(Sale.is_deleted == False)
         .group_by(func.date_format(Sale.created_at, "%b %Y"))
         .all()
     )
@@ -338,6 +344,7 @@ def get_charts(year: int = None, month: int = None, gst: int = 1, db: Session = 
 def get_recent_sales(limit: int = 6, gst: int = 1, db: Session = Depends(get_db)):
     rows = (
         db.query(Sale)
+        .filter(Sale.is_deleted == False)
         .order_by(Sale.created_at.desc())
         .limit(limit)
         .all()

@@ -39,8 +39,8 @@ def get_overview_report(db: Session = Depends(get_db)):
     completed_quantity on every request — the same live columns the PO/WO
     Report tabs already read — so this always reflects the current DB state.
     """
-    pos = db.query(PurchaseOrder).options(joinedload(PurchaseOrder.line_items)).all()
-    wos = db.query(WorkOrder).options(joinedload(WorkOrder.line_items)).all()
+    pos = db.query(PurchaseOrder).options(joinedload(PurchaseOrder.line_items)).filter(PurchaseOrder.is_deleted == False).all()
+    wos = db.query(WorkOrder).options(joinedload(WorkOrder.line_items)).filter(WorkOrder.is_deleted == False).all()
 
     rows: list[OverviewRow] = []
 
@@ -248,7 +248,7 @@ def get_product_pending_report(
                 return mapped_name
         return "Uncategorized"
         
-    pos = db.query(PurchaseOrder).options(joinedload(PurchaseOrder.line_items)).all()
+    pos = db.query(PurchaseOrder).options(joinedload(PurchaseOrder.line_items)).filter(PurchaseOrder.is_deleted == False).all()
 
     raw_items = []
     distinct_clients = set()
@@ -531,7 +531,7 @@ def get_report(
     limit: int = 1000,
     db: Session = Depends(get_db),
 ):
-    q = db.query(Sale)
+    q = db.query(Sale).filter(Sale.is_deleted == False)
     if from_date:
         q = q.filter(Sale.created_at >= from_date)
     if to_date:
@@ -630,7 +630,7 @@ def get_fulfillment_report(
     client: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(PurchaseOrder).options(joinedload(PurchaseOrder.line_items))
+    q = db.query(PurchaseOrder).options(joinedload(PurchaseOrder.line_items)).filter(PurchaseOrder.is_deleted == False)
     if from_date:
         q = q.filter(PurchaseOrder.created_at >= from_date)
     if to_date:
@@ -680,7 +680,10 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
 
     all_pos = (
         db.query(PurchaseOrder)
-        .options(joinedload(PurchaseOrder.sales).joinedload(Sale.items))
+        .options(
+            joinedload(PurchaseOrder.line_items),
+            joinedload(PurchaseOrder.sales).joinedload(Sale.items),
+        )
         .order_by(PurchaseOrder.created_at.desc())
         .all()
     )
@@ -698,8 +701,13 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
         total_gst += t_gst
         total_value += t_total
 
-        t_qty = float(o.total_qty or 0)
-        d_qty = float(o.delivered_qty or 0)
+        # Use line items for full precision (stored total_quantity Float may be rounded)
+        if o.line_items:
+            t_qty = sum(round(float(li.quantity or 0), 10) for li in o.line_items)
+            d_qty = sum(round(float(li.delivered_quantity or 0), 10) for li in o.line_items)
+        else:
+            t_qty = float(o.total_qty or 0)
+            d_qty = float(o.delivered_qty or 0)
 
         # Delivered payment = sum of actual invoiced amounts against this PO,
         # each Sale calculated fresh via the same shared helpers as the Sales
@@ -708,6 +716,8 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
         delivered_sub = delivered_gst_amt = delivered_payment = 0.0
         invoice_numbers = set()
         for s in o.sales:
+            if getattr(s, 'is_deleted', False):
+                continue
             if s.invoice_number:
                 invoice_numbers.add(s.invoice_number.strip())
             for d in s.dispatches:
@@ -752,9 +762,9 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
             status=o.delivery_status,
             date=o.created_at.strftime("%d-%m-%Y") if o.created_at else "—",
             uom=o.uom or "Nos",
-            total_qty=round(t_qty, 2),
-            delivered_qty=round(d_qty, 2),
-            pending_qty=round(pending_qty, 2),
+            total_qty=round(t_qty, 3),
+            delivered_qty=round(d_qty, 3),
+            pending_qty=round(pending_qty, 3),
             remark=o.remark,
         ))
 
@@ -807,6 +817,8 @@ def get_po_fulfillment_summary(po_id: int, db: Session = Depends(get_db)):
     event_dates = []
 
     for s in po.sales:
+        if getattr(s, 'is_deleted', False):
+            continue
         s_taxable, s_gst = compute_sale_taxable_and_gst(s.items)
         invoice_amount = compute_sale_grand_total(s_taxable, s_gst, float(s.freight or 0))
 

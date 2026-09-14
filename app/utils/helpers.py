@@ -295,6 +295,7 @@ def recalc_po_delivered_quantities(db: Session, po) -> None:
     truth for real dispatches) instead of accumulating with +=/-=, so the stored
     value can never drift upward from duplicate/retried calls — it is simply
     overwritten with whatever the Sales table actually contains.
+    Soft-deleted Sales (is_deleted=True) are excluded from the calculation.
     """
     from sqlalchemy import func
     from app.models.models import Sale, SaleItem
@@ -303,16 +304,22 @@ def recalc_po_delivered_quantities(db: Session, po) -> None:
         total = (
             db.query(func.sum(SaleItem.quantity))
             .join(Sale, SaleItem.sale_id == Sale.id)
-            .filter(Sale.po_id == po.id)
+            .filter(Sale.po_id == po.id, Sale.is_deleted == False)
             .scalar() or 0
         )
         po.delivered_quantity = round(max(0, float(total)), 10)
         return
 
-    po_sale_ids = [s.id for s in po.sales]
+    # Only count non-deleted sales
+    po_sale_ids = [s.id for s in po.sales if not getattr(s, 'is_deleted', False)]
     total_all = 0.0
     for li in po.line_items:
-        by_id = db.query(func.sum(SaleItem.quantity)).filter(SaleItem.line_item_id == li.id).scalar() or 0
+        by_id = (
+            db.query(func.sum(SaleItem.quantity))
+            .join(Sale, SaleItem.sale_id == Sale.id)
+            .filter(SaleItem.line_item_id == li.id, Sale.is_deleted == False)
+            .scalar() or 0
+        )
         by_name = 0.0
         if po_sale_ids:
             by_name = db.query(func.sum(SaleItem.quantity)).filter(
@@ -333,6 +340,7 @@ def recalc_wo_completed_quantities(db: Session, wo) -> None:
     +=/-=, so the stored value can never drift upward from duplicate/retried
     calls — it is simply overwritten with whatever the Work Order Sales
     table actually contains.
+    Soft-deleted WorkOrderSales (is_deleted=True) are excluded.
     """
     from sqlalchemy import func
     from app.models.models import WorkOrderSale, WorkOrderSaleItem
@@ -340,10 +348,16 @@ def recalc_wo_completed_quantities(db: Session, wo) -> None:
     if not wo.line_items:
         return
 
-    wo_sale_ids = [s.id for s in wo.work_order_sales]
+    # Only count non-deleted WO sales
+    wo_sale_ids = [s.id for s in wo.work_order_sales if not getattr(s, 'is_deleted', False)]
     total_all = 0.0
     for li in wo.line_items:
-        by_id = db.query(func.sum(WorkOrderSaleItem.quantity)).filter(WorkOrderSaleItem.line_item_id == li.id).scalar() or 0
+        by_id = (
+            db.query(func.sum(WorkOrderSaleItem.quantity))
+            .join(WorkOrderSale, WorkOrderSaleItem.sale_id == WorkOrderSale.id)
+            .filter(WorkOrderSaleItem.line_item_id == li.id, WorkOrderSale.is_deleted == False)
+            .scalar() or 0
+        )
         by_name = 0.0
         if wo_sale_ids:
             by_name = db.query(func.sum(WorkOrderSaleItem.quantity)).filter(

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile,
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from app.database import get_db
 from app.models.models import PurchaseOrder, POLineItem
 from app.schemas.purchase_order import PurchaseOrderCreate, PurchaseOrderUpdate, PurchaseOrderOut, PurchaseOrderShortClose
@@ -291,7 +291,7 @@ def list_purchase_orders(
     current_user: User = Depends(get_current_user),
 ):
     db.expire_all()
-    q = db.query(PurchaseOrder)
+    q = db.query(PurchaseOrder).filter(PurchaseOrder.is_deleted == False)
     if search:
         q = q.filter(
             (PurchaseOrder.po_number.ilike(f"%{search}%")) |
@@ -551,55 +551,54 @@ def short_close_purchase_order(
 
 @router.delete("/{po_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_purchase_order(po_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
+    from datetime import timedelta
     po = db.get(PurchaseOrder, po_id)
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found.")
+    if po.is_deleted:
+        raise HTTPException(status_code=404, detail="Purchase order not found.")
 
     po_number = po.po_number
-    if po.sales:
+    # Check for active (non-deleted) linked sales
+    active_sales = [s for s in po.sales if not s.is_deleted]
+    if active_sales:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete Purchase Order: Please delete the associated Sales first."
         )
 
-    try:
-        db.delete(po)
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete this Purchase Order due to database constraints (linked records exist)."
-        )
-    log_activity(db, "PO Deleted", "PurchaseOrder", f"Deleted PO {po_number}.", deleted_by or "System", po_id, entity_name=po_number)
+    now = datetime.utcnow()
+    po.is_deleted = True
+    po.deleted_at = now
+    po.deleted_by = deleted_by or "System"
+    po.permanent_delete_at = now + timedelta(hours=24)
+    db.commit()
+    log_activity(db, "PO Deleted", "PurchaseOrder", f"Soft-deleted PO {po_number}.", deleted_by or "System", po_id, entity_name=po_number)
 
 
 @router.post("/bulk-delete", response_model=BulkDeleteResult)
 def bulk_delete_purchase_orders(payload: BulkDeleteRequest, db: Session = Depends(get_db)):
-    """Delete many Purchase Orders in one request — best-effort per id (a
-    missing id or a DB constraint on one PO is recorded in `errors` and does
-    not stop the rest of the batch). Mirrors delete_purchase_order's cascade:
-    linked Sales are deleted (and logged) before the PO itself.
-    """
+    """Soft-delete many Purchase Orders in one request — best-effort per id."""
+    from datetime import timedelta
     deleted: list[int] = []
     errors: list[str] = []
+    now = datetime.utcnow()
     for po_id in payload.ids:
         po = db.get(PurchaseOrder, po_id)
-        if not po:
+        if not po or po.is_deleted:
             errors.append(f"PO {po_id}: not found")
             continue
         po_number = po.po_number
-        try:
-            if po.sales:
-                errors.append(f"PO {po_number}: Cannot delete Purchase Order because it has associated Sales. Please delete the Sales first.")
-                continue
-            db.delete(po)
-            db.commit()
-        except IntegrityError:
-            db.rollback()
-            errors.append(f"PO {po_number}: database constraint prevented deletion")
+        active_sales = [s for s in po.sales if not s.is_deleted]
+        if active_sales:
+            errors.append(f"PO {po_number}: Cannot delete Purchase Order because it has associated Sales. Please delete the Sales first.")
             continue
-        log_activity(db, "PO Deleted", "PurchaseOrder", f"Deleted PO {po_number}.", payload.deleted_by or "System", po_id, entity_name=po_number)
+        po.is_deleted = True
+        po.deleted_at = now
+        po.deleted_by = payload.deleted_by or "System"
+        po.permanent_delete_at = now + timedelta(hours=24)
+        db.commit()
+        log_activity(db, "PO Deleted", "PurchaseOrder", f"Soft-deleted PO {po_number}.", payload.deleted_by or "System", po_id, entity_name=po_number)
         deleted.append(po_id)
     return BulkDeleteResult(deleted=deleted, errors=errors)
 
