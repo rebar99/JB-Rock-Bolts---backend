@@ -418,8 +418,14 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db)):
     db.flush()
     recalc_po_delivered_quantities(db, po)
 
+    # Only validate line items that are part of THIS dispatch — not every
+    # item on the PO.  Blocking a valid 16 mm dispatch just because 20 mm
+    # was over-dispatched in a previous (already-saved) sale is wrong.
+    dispatched_li_ids = {si.line_item_id for si in sale.items if si.line_item_id}
     if po.line_items:
         for li in po.line_items:
+            if li.id not in dispatched_li_ids:
+                continue  # skip items not in this dispatch
             if float(li.delivered_quantity or 0) > float(li.quantity or 0):
                 db.rollback()
                 raise HTTPException(
