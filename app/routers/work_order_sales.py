@@ -462,8 +462,6 @@ def update_work_order_sale(sale_id: int, payload: WorkOrderSaleUpdate, db: Sessi
     updates = payload.model_dump(exclude_unset=True)
     updated_by = updates.pop("updated_by", None)
 
-    updated_by = updates.pop("updated_by", None)
-
     # 1 Sale = 1 Delivery Challan — reject if a different challan URL is submitted
     if "delivery_challan_url" in updates and updates["delivery_challan_url"]:
         existing = sale.delivery_challan_url

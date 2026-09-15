@@ -337,13 +337,41 @@ def active_sessions(db: Session = Depends(get_db)):
 
 @router.get("/recent-logins", response_model=List[UserSessionOut])
 def recent_logins(db: Session = Depends(get_db)):
-    """Returns the most recent 20 logins across all users."""
-    return (
+    """Returns the most recent login per user (up to 20 users), newest first.
+
+    Deduplication rule: if a user has multiple sessions in the DB (e.g. due to
+    server restart clearing stale sessions), only their latest session is shown.
+    Override rule: if ANY session for that user is currently is_active=True,
+    the row is returned as is_active=True — so a user who is online never
+    appears as Offline in the History tab.
+    """
+    all_sessions = (
         db.query(UserSession)
         .order_by(UserSession.login_at.desc())
-        .limit(20)
+        .limit(100)
         .all()
     )
+
+    # Collect which user_ids have an active session right now
+    active_user_ids = {
+        s.user_id for s in all_sessions if s.is_active
+    }
+
+    # Keep only the most recent session per user
+    seen_users: set[int] = set()
+    deduped = []
+    for s in all_sessions:
+        if s.user_id in seen_users:
+            continue
+        seen_users.add(s.user_id)
+        # If this user has any active session, mark this row online
+        if s.user_id in active_user_ids:
+            s.is_active = True
+        deduped.append(s)
+        if len(deduped) >= 20:
+            break
+
+    return deduped
 
 
 @router.get("", response_model=list[UserOut])
