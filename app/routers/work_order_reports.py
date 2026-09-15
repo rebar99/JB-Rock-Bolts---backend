@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session, joinedload
 from typing import Optional
 from datetime import datetime
 from app.database import get_db
-from app.models.models import WorkOrder, WorkOrderSale
+from app.models.models import WorkOrder, WorkOrderSale, WorkOrderSaleItem, WOItemMasterItem
 from app.schemas.work_order_reports import (
     WorkOrderReportRow, WorkOrderReportOut, WorkOrderSaleReportRow, WorkOrderSaleReportOut,
 )
@@ -95,11 +95,37 @@ def get_work_order_report(
 
 # ── Work Order Sales report (mirrors the Purchase Order Report's Sales tab) ──
 
+@router.get("/sales-filter-options")
+def get_wo_sales_filter_options(db: Session = Depends(get_db)):
+    """Return distinct client names and WO item categories for the WO Sales tab dropdowns."""
+    clients = (
+        db.query(WorkOrderSale.client_name)
+        .filter(WorkOrderSale.client_name.isnot(None), WorkOrderSale.client_name != "")
+        .distinct()
+        .order_by(WorkOrderSale.client_name)
+        .all()
+    )
+    # WOItemMasterItem has no is_deleted column — query all names directly
+    products = (
+        db.query(WOItemMasterItem.name)
+        .filter(WOItemMasterItem.name.isnot(None))
+        .order_by(WOItemMasterItem.name)
+        .all()
+    )
+    return {
+        "clients": [r[0] for r in clients if r[0]],
+        "products": [r[0] for r in products if r[0]],
+    }
+
+
+# ── Work Order Sales report (mirrors the Purchase Order Report's Sales tab) ──
+
 @router.get("/sales", response_model=WorkOrderSaleReportOut)
 def get_work_order_sales_report(
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
     client: Optional[str] = None,
+    product: Optional[str] = None,
     limit: int = 1000,
     db: Session = Depends(get_db),
 ):
@@ -112,6 +138,9 @@ def get_work_order_sales_report(
         q = q.filter(WorkOrderSale.created_at <= to_date_end)
     if client and client.lower() != "all":
         q = q.filter(WorkOrderSale.client_name.ilike(f"%{client}%"))
+    if product and product.lower() != "all":
+        # Filter sales whose items contain the selected product category keyword
+        q = q.filter(WorkOrderSale.items.any(WorkOrderSaleItem.item.ilike(f"%{product}%")))
 
     sales = q.order_by(WorkOrderSale.created_at.desc()).limit(limit).all()
 
@@ -145,7 +174,6 @@ def get_work_order_sales_report(
     )
 
 
-# ── Combined multi-sheet export ───────────────────────────────────────────────
 
 @router.get("/export-combined")
 def export_combined_work_order_report(

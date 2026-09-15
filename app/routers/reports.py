@@ -520,6 +520,41 @@ def export_product_pending_report(
     return make_excel_response(wb, f"product-wise-pending-analysis-{po_status.lower()}.xlsx")
 
 
+# ── Sales Filter Options ───────────────────────────────────────────────────────
+
+@router.get("/sales-filter-options")
+def get_sales_filter_options(db: Session = Depends(get_db)):
+    """Return distinct client names, item categories and projects for the PO Sales tab dropdowns."""
+    from app.models.models import Sale, ItemMasterItem
+
+    clients = (
+        db.query(Sale.client_name)
+        .filter(Sale.is_deleted == False, Sale.client_name.isnot(None), Sale.client_name != "")
+        .distinct()
+        .order_by(Sale.client_name)
+        .all()
+    )
+    # ItemMasterItem has no is_deleted column — query all names directly
+    products = (
+        db.query(ItemMasterItem.name)
+        .filter(ItemMasterItem.name.isnot(None))
+        .order_by(ItemMasterItem.name)
+        .all()
+    )
+    projects = (
+        db.query(Sale.project)
+        .filter(Sale.is_deleted == False, Sale.project.isnot(None), Sale.project != "")
+        .distinct()
+        .order_by(Sale.project)
+        .all()
+    )
+    return {
+        "clients": [r[0] for r in clients if r[0]],
+        "products": [r[0] for r in products if r[0]],
+        "projects": [r[0] for r in projects if r[0]],
+    }
+
+
 # ── Sales Report ──────────────────────────────────────────────────────────────
 
 @router.get("", response_model=ReportOut)
@@ -528,6 +563,7 @@ def get_report(
     to_date: Optional[datetime] = None,
     product: Optional[str] = None,
     client: Optional[str] = None,
+    project: Optional[str] = None,
     limit: int = 1000,
     db: Session = Depends(get_db),
 ):
@@ -540,15 +576,11 @@ def get_report(
         q = q.filter(Sale.created_at <= to_date_end)
     if product:
         from app.models.models import SaleItem
-        # Filter via a correlated EXISTS (Sale.items.any(...)) instead of an
-        # explicit JOIN. A JOIN here — combined with the joinedload(Sale.items)
-        # below — fans out one row per matching SaleItem times one row per
-        # eager-loaded item, so a multi-item invoice gets counted (and its
-        # GST/subtotal/price summed) more than once. any() adds a WHERE EXISTS
-        # clause instead, which can't multiply the Sale row at all.
         q = q.filter(Sale.items.any(SaleItem.item.ilike(f"%{product}%")))
     if client and client.lower() != "all":
         q = q.filter(Sale.client_name.ilike(f"%{client}%"))
+    if project and project.lower() != "all":
+        q = q.filter(Sale.project.ilike(f"%{project}%"))
 
     sales = q.options(
         joinedload(Sale.items),
