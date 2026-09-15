@@ -526,12 +526,11 @@ def export_product_pending_report(
 def get_sales_filter_options(db: Session = Depends(get_db)):
     """Return distinct client names, item categories and projects for the PO Sales tab dropdowns."""
     from app.models.models import Sale, ItemMasterItem
+    from app.utils.helpers import normalize_client_name, dedupe_names_by_normalized_key, normalize_project_name
 
     clients = (
         db.query(Sale.client_name)
         .filter(Sale.is_deleted == False, Sale.client_name.isnot(None), Sale.client_name != "")
-        .distinct()
-        .order_by(Sale.client_name)
         .all()
     )
     # ItemMasterItem has no is_deleted column — query all names directly
@@ -544,14 +543,12 @@ def get_sales_filter_options(db: Session = Depends(get_db)):
     projects = (
         db.query(Sale.project)
         .filter(Sale.is_deleted == False, Sale.project.isnot(None), Sale.project != "")
-        .distinct()
-        .order_by(Sale.project)
         .all()
     )
     return {
-        "clients": [r[0] for r in clients if r[0]],
+        "clients": dedupe_names_by_normalized_key([r[0] for r in clients if r[0]], normalize_client_name),
         "products": [r[0] for r in products if r[0]],
-        "projects": [r[0] for r in projects if r[0]],
+        "projects": dedupe_names_by_normalized_key([r[0] for r in projects if r[0]], normalize_project_name),
     }
 
 
