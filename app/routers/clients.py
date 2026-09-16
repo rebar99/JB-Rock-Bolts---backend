@@ -7,6 +7,8 @@ from app.database import get_db
 from app.models.models import Client, PurchaseOrder, Record
 from app.schemas.client import ClientCreate, ClientOut, ClientStats, MergeClientsRequest
 from app.utils.helpers import log_activity, normalize_client_name
+from app.utils.auth import require_admin_for_write
+from app.models.models import User
 
 router = APIRouter(prefix="/api/clients", tags=["Clients"])
 
@@ -66,7 +68,7 @@ def list_clients(location: Optional[str] = None, db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=ClientOut, status_code=status.HTTP_201_CREATED)
-def create_client(payload: ClientCreate, db: Session = Depends(get_db)):
+def create_client(payload: ClientCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     new_norm = normalize_client_name(payload.name)
     all_clients = db.query(Client).all()
     for existing in all_clients:
@@ -95,7 +97,7 @@ def create_client(payload: ClientCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/merge", status_code=status.HTTP_200_OK)
-def merge_clients(payload: MergeClientsRequest, db: Session = Depends(get_db)):
+def merge_clients(payload: MergeClientsRequest, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     from app.models.models import PurchaseOrder, Sale, Record, WorkOrder, WorkOrderSale, Project
     
     master = db.get(Client, payload.master_id)
@@ -164,7 +166,7 @@ def merge_clients(payload: MergeClientsRequest, db: Session = Depends(get_db)):
 
 
 @router.delete("/{client_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_client(client_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
+def delete_client(client_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     client = db.get(Client, client_id)
     if not client:
         raise HTTPException(status_code=404, detail="Client not found.")

@@ -8,7 +8,7 @@ from app.models.models import User, WorkOrder, WOLineItem
 from app.schemas.work_order import WorkOrderCreate, WorkOrderUpdate, WorkOrderOut, WorkOrderClose
 from app.schemas.bulk import BulkDeleteRequest, BulkDeleteResult
 from app.utils.helpers import log_activity, generate_wo_number, values_equal_for_update
-from app.utils.auth import get_current_user, require_admin, get_user_id_from_token
+from app.utils.auth import get_current_user, require_admin, get_user_id_from_token, require_admin_for_write
 from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
     parse_optional_datetime, make_excel_response, style_header_row,
@@ -43,7 +43,7 @@ def _field(row: Dict[str, Any], keys):
 # ── File upload ───────────────────────────────────────────────────────────────
 
 @router.post("/upload")
-async def upload_wo_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+async def upload_wo_file(file: UploadFile = File(...), current_user: User = Depends(require_admin_for_write)):
     content = await read_upload_bytes(file)
     file_url = save_upload_bytes(content, file.filename)
     return {"file_url": file_url}
@@ -52,7 +52,7 @@ async def upload_wo_file(file: UploadFile = File(...), current_user: User = Depe
 # ── Auto WO number ───────────────────────────────────────────────────────────
 
 @router.get("/next-number")
-def next_wo_number(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def next_wo_number(db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     return {"wo_number": generate_wo_number(db)}
 
 
@@ -133,6 +133,7 @@ async def import_work_orders(
     on_conflict: str = Query("skip", description="skip | update"),
     created_by: Optional[str] = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_for_write),
 ):
     """Import Work Orders from an Excel (.xlsx) or CSV file.
 
@@ -293,7 +294,7 @@ def list_work_orders(
 
 
 @router.post("", response_model=WorkOrderOut, status_code=status.HTTP_201_CREATED)
-def create_work_order(payload: WorkOrderCreate, db: Session = Depends(get_db)):
+def create_work_order(payload: WorkOrderCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     data = payload.model_dump(exclude={"line_items"})
 
     if payload.line_items:
@@ -337,7 +338,7 @@ def get_work_order(wo_id: int, opened_by: Optional[str] = None, db: Session = De
 
 
 @router.put("/{wo_id}", response_model=WorkOrderOut)
-def update_work_order(wo_id: int, payload: WorkOrderUpdate, authorization: str = Header(default=None), db: Session = Depends(get_db)):
+def update_work_order(wo_id: int, payload: WorkOrderUpdate, authorization: str = Header(default=None), db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     wo = db.get(WorkOrder, wo_id)
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found.")
@@ -482,7 +483,7 @@ def update_work_order(wo_id: int, payload: WorkOrderUpdate, authorization: str =
 
 
 @router.post("/{wo_id}/close", response_model=WorkOrderOut)
-def close_work_order(wo_id: int, payload: WorkOrderClose, db: Session = Depends(get_db)):
+def close_work_order(wo_id: int, payload: WorkOrderClose, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     wo = db.get(WorkOrder, wo_id)
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found.")
@@ -510,7 +511,7 @@ def close_work_order(wo_id: int, payload: WorkOrderClose, db: Session = Depends(
 
 
 @router.delete("/{wo_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_work_order(wo_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
+def delete_work_order(wo_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     from datetime import timedelta
     wo = db.get(WorkOrder, wo_id)
     if not wo:
@@ -537,7 +538,7 @@ def delete_work_order(wo_id: int, deleted_by: Optional[str] = None, db: Session 
 
 
 @router.post("/bulk-delete", response_model=BulkDeleteResult)
-def bulk_delete_work_orders(payload: BulkDeleteRequest, db: Session = Depends(get_db)):
+def bulk_delete_work_orders(payload: BulkDeleteRequest, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     """Soft-delete many Work Orders in one request — best-effort per id."""
     from datetime import timedelta
     deleted: list[int] = []

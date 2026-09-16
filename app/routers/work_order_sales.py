@@ -14,7 +14,7 @@ from app.routers.upload_helpers import (
     parse_optional_datetime, make_excel_response, style_header_row,
 )
 from app.models.models import User, WorkOrderSale, WorkOrderSaleActivity, WorkOrder, WorkOrderSaleItem, WorkOrderSaleDispatch, WorkOrderSaleDispatchItem
-from app.utils.auth import get_current_user
+from app.utils.auth import get_current_user, require_admin_for_write
 from app.schemas.work_order_sale import (
     WorkOrderSaleCreate, WorkOrderSaleUpdate, WorkOrderSaleOut, WorkOrderSaleActivityCreate, WorkOrderSaleActivityOut, WorkOrderSaleItemCreate,
     WorkOrderSaleDispatchCreate, WorkOrderSaleDispatchOut,
@@ -73,7 +73,7 @@ def list_work_order_sales(
 # ── File upload ───────────────────────────────────────────────────────────────
 
 @router.post("/upload")
-async def upload_wo_invoice_file(file: UploadFile = File(...)):
+async def upload_wo_invoice_file(file: UploadFile = File(...), current_user: User = Depends(require_admin_for_write)):
     content = await read_upload_bytes(file)
     file_url = save_upload_bytes(content, file.filename)
     return {"file_url": file_url}
@@ -151,6 +151,7 @@ async def import_work_order_sales(
     on_conflict: str = Query("skip", description="skip | update"),
     created_by: Optional[str] = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_for_write),
 ):
     """Import Work Order Sales from an Excel (.xlsx) or CSV file.
 
@@ -330,7 +331,7 @@ async def import_work_order_sales(
 # ── CRUD ──────────────────────────────────────────────────────────────────────
 
 @router.post("", response_model=WorkOrderSaleOut, status_code=status.HTTP_201_CREATED)
-def create_work_order_sale(payload: WorkOrderSaleCreate, db: Session = Depends(get_db)):
+def create_work_order_sale(payload: WorkOrderSaleCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     wo = db.get(WorkOrder, payload.wo_id)
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found.")
@@ -454,7 +455,7 @@ def get_work_order_sale(sale_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/{sale_id}", response_model=WorkOrderSaleOut)
-def update_work_order_sale(sale_id: int, payload: WorkOrderSaleUpdate, db: Session = Depends(get_db)):
+def update_work_order_sale(sale_id: int, payload: WorkOrderSaleUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     sale = db.get(WorkOrderSale, sale_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Work order sale not found.")
@@ -572,6 +573,7 @@ def mark_delivered(
     sale_id: int,
     payload: MarkDeliveredPayload,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_for_write),
 ):
     sale = db.get(WorkOrderSale, sale_id)
     if not sale:
@@ -612,7 +614,7 @@ def mark_delivered(
 
 
 @router.delete("/{sale_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_work_order_sale(sale_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
+def delete_work_order_sale(sale_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     sale = db.get(WorkOrderSale, sale_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Work order sale not found.")
@@ -634,7 +636,7 @@ def delete_work_order_sale(sale_id: int, deleted_by: Optional[str] = None, db: S
 
 
 @router.post("/bulk-delete", response_model=BulkDeleteResult)
-def bulk_delete_work_order_sales(payload: BulkDeleteRequest, db: Session = Depends(get_db)):
+def bulk_delete_work_order_sales(payload: BulkDeleteRequest, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     """Soft-delete many WO Sale invoices in one request — best-effort per id."""
     deleted: list[int] = []
     errors: list[str] = []
@@ -660,7 +662,7 @@ def bulk_delete_work_order_sales(payload: BulkDeleteRequest, db: Session = Depen
 
 
 @router.post("/{sale_id}/activities", response_model=WorkOrderSaleActivityOut, status_code=status.HTTP_201_CREATED)
-def add_activity(sale_id: int, payload: WorkOrderSaleActivityCreate, db: Session = Depends(get_db)):
+def add_activity(sale_id: int, payload: WorkOrderSaleActivityCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     sale = db.get(WorkOrderSale, sale_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Work order sale not found.")
@@ -678,7 +680,7 @@ def add_activity(sale_id: int, payload: WorkOrderSaleActivityCreate, db: Session
 
 
 @router.delete("/{sale_id}/dispatches/{dispatch_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_work_order_sale_dispatch(sale_id: int, dispatch_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
+def delete_work_order_sale_dispatch(sale_id: int, dispatch_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     """Remove one dispatch event (e.g. a mistaken 'Dispatch More' entry) so it
     stops showing up in the WO fulfillment summary's dispatch history. This
     only removes the dispatch log entry — it does not touch the sale's
@@ -704,7 +706,7 @@ def delete_work_order_sale_dispatch(sale_id: int, dispatch_id: int, deleted_by: 
 
 
 @router.post("/{sale_id}/dispatches", response_model=WorkOrderSaleDispatchOut, status_code=status.HTTP_201_CREATED)
-def add_work_order_sale_dispatch(sale_id: int, payload: WorkOrderSaleDispatchCreate, db: Session = Depends(get_db)):
+def add_work_order_sale_dispatch(sale_id: int, payload: WorkOrderSaleDispatchCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     """Record one additional dispatch event ('Dispatch More') against an
     existing invoice, so the WO fulfillment summary can list it separately
     from the invoice's original dispatch — with its own date/qty/amount."""

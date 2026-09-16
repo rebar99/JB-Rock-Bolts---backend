@@ -3,8 +3,9 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
 from app.database import get_db
-from app.models.models import Record
+from app.models.models import Record, User
 from app.schemas.record import RecordCreate, RecordUpdate, RecordOut
+from app.utils.auth import require_admin_for_write
 
 router = APIRouter(prefix="/api/records", tags=["Records"])
 
@@ -32,7 +33,7 @@ def list_records(
 
 
 @router.post("", response_model=RecordOut, status_code=status.HTTP_201_CREATED)
-def create_record(payload: RecordCreate, db: Session = Depends(get_db)):
+def create_record(payload: RecordCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     record = Record(**payload.model_dump())
     db.add(record)
     db.commit()
@@ -41,7 +42,7 @@ def create_record(payload: RecordCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/{record_id}", response_model=RecordOut)
-def update_record(record_id: int, payload: RecordUpdate, db: Session = Depends(get_db)):
+def update_record(record_id: int, payload: RecordUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     record = db.get(Record, record_id)
     if not record:
         raise HTTPException(status_code=404, detail="Record not found.")
@@ -53,7 +54,7 @@ def update_record(record_id: int, payload: RecordUpdate, db: Session = Depends(g
 
 
 @router.delete("/{record_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_record(record_id: int, db: Session = Depends(get_db)):
+def delete_record(record_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     record = db.get(Record, record_id)
     if not record:
         raise HTTPException(status_code=404, detail="Record not found.")

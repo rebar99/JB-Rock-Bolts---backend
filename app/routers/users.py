@@ -50,7 +50,7 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
         name=payload.name,
         email=payload.email,
         hashed_password=hash_password(payload.password),
-        is_active=True,
+        is_active=False,  # Pending admin approval
     )
     db.add(user)
     db.commit()

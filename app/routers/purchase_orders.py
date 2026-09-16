@@ -8,7 +8,7 @@ from app.models.models import PurchaseOrder, POLineItem
 from app.schemas.purchase_order import PurchaseOrderCreate, PurchaseOrderUpdate, PurchaseOrderOut, PurchaseOrderShortClose
 from app.schemas.bulk import BulkDeleteRequest, BulkDeleteResult
 from app.utils.helpers import log_activity, recalc_po_delivered_quantities, values_equal_for_update
-from app.utils.auth import require_admin, get_user_id_from_token, get_current_user
+from app.utils.auth import require_admin, get_user_id_from_token, get_current_user, require_admin_for_write
 from app.models.models import User
 from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
@@ -42,7 +42,7 @@ def _field(row: Dict[str, Any], keys):
 # ── File upload ───────────────────────────────────────────────────────────────
 
 @router.post("/upload")
-async def upload_po_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+async def upload_po_file(file: UploadFile = File(...), current_user: User = Depends(require_admin_for_write)):
     content = await read_upload_bytes(file)
     file_url = save_upload_bytes(content, file.filename)
     return {"file_url": file_url}
@@ -122,7 +122,7 @@ def export_purchase_orders(db: Session = Depends(get_db), current_user: User = D
 # ── Recalculate delivered_quantity for all line items ─────────────────────────
 
 @router.post("/recalculate-delivered")
-def recalculate_delivered_quantities(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def recalculate_delivered_quantities(db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     """Rebuild delivered_quantity for every PO/line item from actual SaleItem records.
 
     create_sale/update_sale/delete_sale now keep this in sync automatically after
@@ -150,7 +150,7 @@ async def import_purchase_orders(
     on_conflict: str = Query("skip", description="skip | update"),
     created_by: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin_for_write),
 ):
     """Import Purchase Orders from an Excel (.xlsx) or CSV file.
 
@@ -303,7 +303,7 @@ def list_purchase_orders(
 
 
 @router.post("", response_model=PurchaseOrderOut, status_code=status.HTTP_201_CREATED)
-def create_purchase_order(payload: PurchaseOrderCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def create_purchase_order(payload: PurchaseOrderCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     data = payload.model_dump(exclude={"line_items"})
 
     if payload.line_items:
@@ -347,7 +347,7 @@ def get_purchase_order(po_id: int, opened_by: Optional[str] = None, db: Session 
 
 
 @router.put("/{po_id}", response_model=PurchaseOrderOut)
-def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, authorization: str = Header(default=None), db: Session = Depends(get_db)):
+def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, authorization: str = Header(default=None), db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     po = db.get(PurchaseOrder, po_id)
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found.")
@@ -550,7 +550,7 @@ def short_close_purchase_order(
 
 
 @router.delete("/{po_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_purchase_order(po_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
+def delete_purchase_order(po_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     from datetime import timedelta
     po = db.get(PurchaseOrder, po_id)
     if not po:
@@ -577,7 +577,7 @@ def delete_purchase_order(po_id: int, deleted_by: Optional[str] = None, db: Sess
 
 
 @router.post("/bulk-delete", response_model=BulkDeleteResult)
-def bulk_delete_purchase_orders(payload: BulkDeleteRequest, db: Session = Depends(get_db)):
+def bulk_delete_purchase_orders(payload: BulkDeleteRequest, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     """Soft-delete many Purchase Orders in one request — best-effort per id."""
     from datetime import timedelta
     deleted: list[int] = []

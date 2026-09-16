@@ -6,6 +6,8 @@ from app.database import get_db
 from app.models.models import Product, Sale
 from app.schemas.product import ProductCreate, ProductUpdate, ProductOut
 from app.utils.helpers import derive_inventory_status, log_activity
+from app.utils.auth import require_admin_for_write
+from app.models.models import User
 
 router = APIRouter(prefix="/api/inventory", tags=["Inventory"])
 
@@ -36,7 +38,7 @@ def list_inventory(db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=ProductOut, status_code=status.HTTP_201_CREATED)
-def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
+def create_product(payload: ProductCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     existing = db.query(Product).filter(Product.name == payload.name).first()
     if existing:
         raise HTTPException(
@@ -52,7 +54,7 @@ def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/{product_id}", response_model=ProductOut)
-def update_product(product_id: int, payload: ProductUpdate, db: Session = Depends(get_db)):
+def update_product(product_id: int, payload: ProductUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     product = db.get(Product, product_id)
     if not product:
         raise HTTPException(status_code=404, detail="Product not found.")
@@ -85,7 +87,7 @@ def update_product(product_id: int, payload: ProductUpdate, db: Session = Depend
 
 
 @router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_product(product_id: int, db: Session = Depends(get_db)):
+def delete_product(product_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     product = db.get(Product, product_id)
     if not product:
         raise HTTPException(status_code=404, detail="Product not found.")

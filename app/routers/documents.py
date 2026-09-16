@@ -95,13 +95,41 @@ def _amount_words(amount: float) -> str:
     return " ".join(parts).strip() + " Only."
 
 
+# ── HTML error helper ────────────────────────────────────────────────────────
+
+def _html_not_found(message: str) -> HTMLResponse:
+    """Return a user-friendly HTML page instead of a raw JSON 404."""
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Document Not Found</title>
+  <style>
+    body {{font-family:'Segoe UI',Arial,sans-serif;display:flex;align-items:center;
+           justify-content:center;min-height:80vh;background:#f8f9fa;margin:0}}
+    .box {{background:#fff;border-radius:8px;padding:48px 56px;text-align:center;
+           box-shadow:0 2px 12px rgba(0,0,0,.08);max-width:420px}}
+    h1 {{font-size:18px;color:#dc2626;margin-bottom:12px}}
+    p  {{font-size:14px;color:#555;margin:0}}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>⚠ Document Not Found</h1>
+    <p>{message}</p>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(content=html, status_code=404)
+
+
 # ── PO Document ───────────────────────────────────────────────────────────────
 
 @router.get("/po/{po_id}", response_class=HTMLResponse)
 def get_po_document(po_id: int, db: Session = Depends(get_db)):
     po = db.get(PurchaseOrder, po_id)
     if not po:
-        raise HTTPException(status_code=404, detail="Purchase order not found.")
+        return _html_not_found("Purchase order not found. It may have been deleted or the link is invalid.")
 
     gst_rate = po.gst_rate
     subtotal = po.subtotal
@@ -445,7 +473,7 @@ def get_po_document(po_id: int, db: Session = Depends(get_db)):
 def get_wo_document(wo_id: int, db: Session = Depends(get_db)):
     wo = db.get(WorkOrder, wo_id)
     if not wo:
-        raise HTTPException(status_code=404, detail="Work order not found.")
+        return _html_not_found("Work order not found. It may have been deleted or the link is invalid.")
 
     subtotal = wo.subtotal
     gst_amount = wo.gst_amount
@@ -671,7 +699,7 @@ def get_wo_document(wo_id: int, db: Session = Depends(get_db)):
 def get_invoice_document(sale_id: int, download: bool = False, db: Session = Depends(get_db)):
     sale = db.get(Sale, sale_id)
     if not sale:
-        raise HTTPException(status_code=404, detail="Sale not found.")
+        return _html_not_found("Sale not found. It may have been deleted or the link is invalid.")
 
     # Load linked PO and Client for extra fields
     po = db.get(PurchaseOrder, sale.po_id) if sale.po_id else None
@@ -1141,7 +1169,7 @@ def get_invoice_document(sale_id: int, download: bool = False, db: Session = Dep
 def get_wo_invoice_document(sale_id: int, download: bool = False, db: Session = Depends(get_db)):
     sale = db.get(WorkOrderSale, sale_id)
     if not sale:
-        raise HTTPException(status_code=404, detail="Work order sale not found.")
+        return _html_not_found("Work order sale not found. It may have been deleted or the link is invalid.")
 
     wo = db.get(WorkOrder, sale.wo_id) if sale.wo_id else None
 

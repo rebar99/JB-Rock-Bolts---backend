@@ -90,3 +90,35 @@ def require_admin(authorization: str, db: Session, detail: str = "Admin access r
     if not user or not user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
     return user
+
+
+def require_admin_for_write(
+    authorization: str = Header(..., alias="Authorization"),
+    db: Session = Depends(get_db),
+) -> User:
+    """FastAPI dependency for all mutating (POST/PUT/DELETE) endpoints.
+
+    Allows admin users to proceed; raises HTTP 403 for regular (non-admin) users.
+    Regular users have read-only access — they can call GET endpoints freely but
+    cannot create, update, delete, or upload any data.
+
+    Usage:  current_user: User = Depends(require_admin_for_write)
+    """
+    user_id = get_user_id_from_token(authorization)
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token.",
+        )
+    user = db.get(User, user_id)
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive.",
+        )
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to perform this action. Read-only access only.",
+        )
+    return user

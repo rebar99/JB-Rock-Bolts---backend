@@ -5,6 +5,8 @@ from app.database import get_db
 from app.models.models import Project, Client, WorkOrder
 from app.schemas.project import ProjectCreate, ProjectOut
 from app.utils.helpers import log_activity, normalize_client_name, normalize_project_name
+from app.utils.auth import require_admin_for_write
+from app.models.models import User
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 
@@ -58,7 +60,7 @@ def list_projects(client_id: int = None, client_name: str = None, source: Option
     return deduped
 
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
-def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
+def create_project(payload: ProjectCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     client = db.query(Client).filter(Client.name == payload.client_name).first()
     if not client:
         client = Client(name=payload.client_name, location="Unknown")
@@ -74,7 +76,7 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
     return project
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_project(project_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
+def delete_project(project_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
@@ -87,7 +89,7 @@ def delete_project(project_id: int, deleted_by: Optional[str] = None, db: Sessio
 from app.schemas.project import MergeProjectsRequest
 
 @router.post("/merge", status_code=status.HTTP_200_OK)
-def merge_projects(payload: MergeProjectsRequest, db: Session = Depends(get_db)):
+def merge_projects(payload: MergeProjectsRequest, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     from app.models.models import PurchaseOrder, Sale, WorkOrder, WorkOrderSale
     from sqlalchemy import func
     

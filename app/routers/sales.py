@@ -22,6 +22,8 @@ from app.schemas.sale import (
     SaleDispatchCreate, SaleDispatchOut,
 )
 from app.schemas.bulk import BulkDeleteRequest, BulkDeleteResult
+from app.utils.auth import require_admin_for_write
+from app.models.models import User
 
 router = APIRouter(prefix="/api/sales", tags=["Sales"])
 
@@ -73,7 +75,7 @@ def list_sales(
 # ── File upload ───────────────────────────────────────────────────────────────
 
 @router.post("/upload")
-async def upload_invoice_file(file: UploadFile = File(...)):
+async def upload_invoice_file(file: UploadFile = File(...), current_user: User = Depends(require_admin_for_write)):
     content = await read_upload_bytes(file)
     file_url = save_upload_bytes(content, file.filename)
     return {"file_url": file_url}
@@ -154,6 +156,7 @@ async def import_sales(
     on_conflict: str = Query("skip", description="skip | update"),
     created_by: Optional[str] = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_for_write),
 ):
     """Import Sales from an Excel (.xlsx) or CSV file.
 
@@ -338,7 +341,7 @@ async def import_sales(
 # ── CRUD ──────────────────────────────────────────────────────────────────────
 
 @router.post("", response_model=SaleOut, status_code=status.HTTP_201_CREATED)
-def create_sale(payload: SaleCreate, db: Session = Depends(get_db)):
+def create_sale(payload: SaleCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     po = db.get(PurchaseOrder, payload.po_id)
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found.")
@@ -488,7 +491,7 @@ def get_sale(sale_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/{sale_id}", response_model=SaleOut)
-def update_sale(sale_id: int, payload: SaleUpdate, db: Session = Depends(get_db)):
+def update_sale(sale_id: int, payload: SaleUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     sale = db.get(Sale, sale_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Sale not found.")
@@ -618,6 +621,7 @@ def mark_delivered(
     sale_id: int,
     payload: MarkDeliveredPayload,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_for_write),
 ):
     sale = db.get(Sale, sale_id)
     if not sale:
@@ -658,7 +662,7 @@ def mark_delivered(
 
 
 @router.delete("/{sale_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_sale(sale_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
+def delete_sale(sale_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     from datetime import timezone, timedelta
     sale = db.get(Sale, sale_id)
     if not sale:
@@ -682,7 +686,7 @@ def delete_sale(sale_id: int, deleted_by: Optional[str] = None, db: Session = De
 
 
 @router.post("/bulk-delete", response_model=BulkDeleteResult)
-def bulk_delete_sales(payload: BulkDeleteRequest, db: Session = Depends(get_db)):
+def bulk_delete_sales(payload: BulkDeleteRequest, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     """Soft-delete many Sale invoices in one request."""
     from datetime import timezone, timedelta
     deleted: list[int] = []
@@ -709,7 +713,7 @@ def bulk_delete_sales(payload: BulkDeleteRequest, db: Session = Depends(get_db))
 
 
 @router.post("/{sale_id}/activities", response_model=SaleActivityOut, status_code=status.HTTP_201_CREATED)
-def add_activity(sale_id: int, payload: SaleActivityCreate, db: Session = Depends(get_db)):
+def add_activity(sale_id: int, payload: SaleActivityCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     sale = db.get(Sale, sale_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Sale not found.")
@@ -727,7 +731,7 @@ def add_activity(sale_id: int, payload: SaleActivityCreate, db: Session = Depend
 
 
 @router.delete("/{sale_id}/dispatches/{dispatch_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_sale_dispatch(sale_id: int, dispatch_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db)):
+def delete_sale_dispatch(sale_id: int, dispatch_id: int, deleted_by: Optional[str] = None, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     """Remove one dispatch event (e.g. a mistaken 'Dispatch More' entry) so it
     stops showing up in the PO Fulfillment Summary's dispatch history. This
     only removes the dispatch log entry — it does not touch the sale's
@@ -753,7 +757,7 @@ def delete_sale_dispatch(sale_id: int, dispatch_id: int, deleted_by: Optional[st
 
 
 @router.post("/{sale_id}/dispatches", response_model=SaleDispatchOut, status_code=status.HTTP_201_CREATED)
-def add_sale_dispatch(sale_id: int, payload: SaleDispatchCreate, db: Session = Depends(get_db)):
+def add_sale_dispatch(sale_id: int, payload: SaleDispatchCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin_for_write)):
     """Record one additional dispatch event ('Dispatch More') against an
     existing invoice, so the PO fulfillment summary can list it separately
     from the invoice's original dispatch — with its own date/qty/amount."""
