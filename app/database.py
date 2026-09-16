@@ -35,6 +35,9 @@ engine = create_engine(
     pool_recycle=3600,
     pool_size=10,
     max_overflow=20,
+    # Force every connection to use UTC so timestamps are always stored/returned
+    # in UTC — the frontend converts UTC → IST for display.
+    connect_args={"init_command": "SET time_zone='+00:00'"},
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

@@ -144,29 +144,30 @@ async def login(payload: UserLogin, db: Session = Depends(get_db)):
             detail="Admin has not approved your request yet.",
         )
         
-    # Check if user is active
+    # Check if user is active on another session
     if manager.is_user_active(user.id):
         request_id = str(uuid.uuid4())
         event = asyncio.Event()
         manager.pending_login_events[request_id] = event
-        
-        # Send alert
+
+        # Notify the active session
         await manager.notify_user(user.id, {
             "type": "LOGIN_ATTEMPT",
             "request_id": request_id,
             "message": "Someone is trying to log in to your account. Is this you?"
         })
-        
-        # Wait for approval (timeout after 60 seconds)
+
+        # Wait up to 15 seconds for a response; if no response → allow login
         try:
-            await asyncio.wait_for(event.wait(), timeout=60.0)
-            approved = manager.pending_login_results.get(request_id, False)
+            await asyncio.wait_for(event.wait(), timeout=15.0)
+            approved = manager.pending_login_results.get(request_id, True)
         except asyncio.TimeoutError:
-            approved = False
+            # No response from active session (dead tab / closed browser) → allow
+            approved = True
         finally:
             manager.pending_login_events.pop(request_id, None)
             manager.pending_login_results.pop(request_id, None)
-            
+
         if not approved:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -339,12 +340,15 @@ def active_sessions(db: Session = Depends(get_db)):
 def recent_logins(db: Session = Depends(get_db)):
     """Returns the most recent login per user (up to 20 users), newest first.
 
-    Deduplication rule: if a user has multiple sessions in the DB (e.g. due to
-    server restart clearing stale sessions), only their latest session is shown.
-    Override rule: if ANY session for that user is currently is_active=True,
-    the row is returned as is_active=True — so a user who is online never
-    appears as Offline in the History tab.
+    Online status is sourced from the live SSE connection list (notifications
+    module) — not from the DB is_active flag — so a backend restart never
+    causes an actively-connected user to appear as Offline in the History tab.
     """
+    from app import notifications as notif
+
+    # user_ids who currently have the app open (live SSE connection)
+    live_user_ids = {u["user_id"] for u in notif.get_online_users()}
+
     all_sessions = (
         db.query(UserSession)
         .order_by(UserSession.login_at.desc())
@@ -352,10 +356,13 @@ def recent_logins(db: Session = Depends(get_db)):
         .all()
     )
 
-    # Collect which user_ids have an active session right now
-    active_user_ids = {
-        s.user_id for s in all_sessions if s.is_active
-    }
+    # Sync DB sessions with live status:
+    # mark active if SSE is live, mark inactive if SSE is gone
+    for s in all_sessions:
+        if s.user_id in live_user_ids:
+            s.is_active = True
+        # Don't flip to False here — keep DB state for users not in SSE
+        # (they may have just briefly disconnected)
 
     # Keep only the most recent session per user
     seen_users: set[int] = set()
@@ -364,9 +371,8 @@ def recent_logins(db: Session = Depends(get_db)):
         if s.user_id in seen_users:
             continue
         seen_users.add(s.user_id)
-        # If this user has any active session, mark this row online
-        if s.user_id in active_user_ids:
-            s.is_active = True
+        # Use live SSE status as the definitive online indicator
+        s.is_active = s.user_id in live_user_ids
         deduped.append(s)
         if len(deduped) >= 20:
             break
