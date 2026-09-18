@@ -250,6 +250,15 @@ def generate_wo_invoice_number(db: Session) -> str:
     return f"WINV-{year}-{str(count + 1).zfill(4)}"
 
 
+def generate_credit_note_number(db: Session) -> str:
+    from app.models.models import CreditNote
+    year = datetime.now().year
+    count = db.query(CreditNote).filter(
+        CreditNote.cn_number.like(f"CN-{year}-%")
+    ).count()
+    return f"CN-{year}-{str(count + 1).zfill(4)}"
+
+
 def compute_line_taxable_and_gst(quantity: float, unit_price: float, gst_rate: float) -> tuple:
     """Recompute Taxable Amount and GST Amount for a single dispatch line item,
     directly from the raw values entered by the user: quantity, unit price, and

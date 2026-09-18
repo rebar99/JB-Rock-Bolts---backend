@@ -880,3 +880,73 @@ class CompanyAddress(Base):
     is_default = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class CreditNote(Base):
+    """Adjustment document against a PO Sale or WO Sale.
+    Never modifies the original sale — acts as a separate linked record.
+    sale_type = 'PO' → sale_id references sales.id
+    sale_type = 'WO' → wo_sale_id references work_order_sales.id
+    """
+    __tablename__ = "credit_notes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    cn_number = Column(String(50), nullable=False, unique=True, index=True)
+    cn_date = Column(Date, nullable=False)
+    sale_type = Column(String(5), nullable=False)  # 'PO' or 'WO'
+
+    # FK to the original sale (one of these will be non-null)
+    sale_id = Column(Integer, ForeignKey("sales.id"), nullable=True)
+    wo_sale_id = Column(Integer, ForeignKey("work_order_sales.id"), nullable=True)
+
+    # Denormalised for fast listing (copied from original sale at creation)
+    invoice_number = Column(String(50), nullable=True)
+    po_number = Column(String(100), nullable=True)
+    client_name = Column(String(200), nullable=False)
+    project = Column(String(300), nullable=True)
+
+    reason = Column(String(100), nullable=False)   # one of the dropdown values
+
+    # Computed totals (stored at creation, same as WorkOrderSale pattern)
+    taxable_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    gst_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    total_amount = Column(Numeric(12, 2), nullable=False, default=0)
+
+    status = Column(String(20), nullable=False, default="Issued", server_default="Issued")
+
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    # Soft-delete
+    is_deleted = Column(Boolean, default=False, nullable=False, server_default="0")
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_by = Column(String(100), nullable=True)
+
+    # Relationships
+    sale = relationship("Sale", foreign_keys=[sale_id], backref="credit_notes")
+    wo_sale = relationship("WorkOrderSale", foreign_keys=[wo_sale_id], backref="credit_notes")
+    items = relationship("CreditNoteItem", back_populates="credit_note", cascade="all, delete-orphan")
+
+
+class CreditNoteItem(Base):
+    __tablename__ = "credit_note_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    credit_note_id = Column(Integer, ForeignKey("credit_notes.id"), nullable=False)
+
+    item = Column(String(300), nullable=False)
+    uom = Column(String(50), nullable=False, default="Nos")
+    original_qty = Column(Float, nullable=False, default=0)
+    credit_qty = Column(Float, nullable=False, default=0)
+    unit_price = Column(Numeric(12, 2), nullable=False, default=0)
+    gst_rate = Column(Float, nullable=False, default=0)
+
+    # Stored totals (credit_qty × unit_price)
+    subtotal = Column(Numeric(12, 2), nullable=False, default=0)
+    gst_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    total_amount = Column(Numeric(12, 2), nullable=False, default=0)
+
+    credit_note = relationship("CreditNote", back_populates="items")
+

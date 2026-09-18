@@ -31,6 +31,7 @@ from app.routers import uom
 from app.routers import company_addresses
 from app.routers import system
 from app.routers import recently_deleted
+from app.routers import credit_notes
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -277,8 +278,60 @@ async def lifespan(app: FastAPI):
                         except Exception:
                             pass
 
+            # ── Credit Notes tables (created by Base.metadata.create_all above,
+            #    but safe-create here for clarity and idempotency) ──────────────
+            try:
+                conn.execute(text("SELECT id FROM credit_notes LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS credit_notes (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            cn_number VARCHAR(50) NOT NULL UNIQUE,
+                            cn_date DATE NOT NULL,
+                            sale_type VARCHAR(5) NOT NULL,
+                            sale_id INT NULL,
+                            wo_sale_id INT NULL,
+                            invoice_number VARCHAR(50) NULL,
+                            po_number VARCHAR(100) NULL,
+                            client_name VARCHAR(200) NOT NULL,
+                            project VARCHAR(300) NULL,
+                            reason VARCHAR(100) NOT NULL,
+                            taxable_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+                            gst_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+                            total_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+                            status VARCHAR(20) NOT NULL DEFAULT 'Issued',
+                            created_by VARCHAR(100) NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_by VARCHAR(100) NULL,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+                            deleted_at DATETIME NULL,
+                            deleted_by VARCHAR(100) NULL
+                        )
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS credit_note_items (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            credit_note_id INT NOT NULL,
+                            item VARCHAR(300) NOT NULL,
+                            uom VARCHAR(50) NOT NULL DEFAULT 'Nos',
+                            original_qty FLOAT NOT NULL DEFAULT 0,
+                            credit_qty FLOAT NOT NULL DEFAULT 0,
+                            unit_price DECIMAL(12,2) NOT NULL DEFAULT 0,
+                            gst_rate FLOAT NOT NULL DEFAULT 0,
+                            subtotal DECIMAL(12,2) NOT NULL DEFAULT 0,
+                            gst_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+                            total_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+                            FOREIGN KEY (credit_note_id) REFERENCES credit_notes(id)
+                        )
+                    """))
+                except Exception as ce:
+                    logger.warning(f"Credit notes table creation: {ce}")
+
     except Exception as e:
         logger.error(f"Error applying schema updates: {e}")
+
 
     db = SessionLocal()
     try:
@@ -448,6 +501,7 @@ app.include_router(uom.router)
 app.include_router(company_addresses.router)
 app.include_router(system.router)
 app.include_router(recently_deleted.router)
+app.include_router(credit_notes.router)
 
 
 @app.get("/", tags=["Health"])
