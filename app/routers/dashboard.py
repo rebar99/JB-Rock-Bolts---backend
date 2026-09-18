@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.database import get_db
-from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus, ItemMasterItem, User
+from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus, ItemMasterItem, User, WorkOrderSale
 from app.utils.auth import get_current_user
 from app.schemas.dashboard import DashboardStats, ChartData, ChartDataPoint, MonthlyTrend, RecentSale
 from app.utils.helpers import (
@@ -149,19 +149,45 @@ def get_stats(gst: int = 1, db: Session = Depends(get_db)):
     # dashboard total, no join that could duplicate a row.
     all_sales = db.query(Sale).options(joinedload(Sale.items)).filter(Sale.is_deleted == False).all()
 
-    # Total revenue: computed with the exact same formula as the Sales Report
+    # ── PO Sales revenue ────────────────────────────────────────────────────
+    # Computed with the exact same formula as the Sales Report
     # (Taxable Amount + GST from each sale's own line items, then + Freight),
     # summed once per Sale record — never read from the stored
     # Sale.grand_total column, so this can never drift from the Sales Report
     # or the Sales page, and is recalculated from scratch on every request.
-    total_revenue = 0.0
+    po_revenue = 0.0
     for s in all_sales:
         taxable_amount, gst_amount = compute_sale_taxable_and_gst(s.items)
         if gst == 1:
-            total_revenue += compute_sale_grand_total(taxable_amount, gst_amount, float(s.freight or 0))
+            po_revenue += compute_sale_grand_total(taxable_amount, gst_amount, float(s.freight or 0))
         else:
-            total_revenue += taxable_amount + float(s.freight or 0)
-    total_revenue = round(total_revenue, 2)
+            po_revenue += taxable_amount + float(s.freight or 0)
+
+    # ── Work Order Sales revenue ─────────────────────────────────────────────
+    # Uses the EXACT same formula as the WO Sales Report
+    # (work_order_reports.py → get_work_order_sales_report):
+    #   compute_sale_taxable_and_gst(s.items) → taxable + gst live from items
+    #   compute_sale_grand_total(taxable, gst, freight)  → with GST
+    #   taxable + freight                                → without GST
+    # Items are eager-loaded to avoid N+1 queries.
+    # Deleted WO Sales are excluded.
+    all_wo_sales = (
+        db.query(WorkOrderSale)
+        .options(joinedload(WorkOrderSale.items))
+        .filter(WorkOrderSale.is_deleted == False)
+        .all()
+    )
+    wo_revenue = 0.0
+    for ws in all_wo_sales:
+        wo_taxable, wo_gst = compute_sale_taxable_and_gst(ws.items)
+        wo_freight = float(ws.freight or 0)
+        if gst == 1:
+            wo_revenue += compute_sale_grand_total(wo_taxable, wo_gst, wo_freight)
+        else:
+            wo_revenue += wo_taxable + wo_freight
+
+    total_revenue = round(po_revenue + wo_revenue, 2)
+
 
     # Total number of dispatches
     total_orders = len(all_sales)

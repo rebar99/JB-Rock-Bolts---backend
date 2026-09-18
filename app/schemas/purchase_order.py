@@ -184,8 +184,12 @@ class PurchaseOrderOut(PurchaseOrderBase):
     @computed_field
     @property
     def gst_amount(self) -> float:
-        # 1. Global GST (if set and not "0")
-        if self.gst and self.gst.strip() not in ("", "0"):
+        # 1. Global GST explicitly set to "0" → no GST at all (ignore line items)
+        if self.gst is not None and self.gst.strip() == "0":
+            return 0.0
+
+        # 2. Global GST set to a non-zero value
+        if self.gst and self.gst.strip() != "":
             if self.gst.startswith("₹"):
                 cleaned = self.gst.replace("₹", "").replace(",", "").strip()
                 try:
@@ -195,7 +199,7 @@ class PurchaseOrderOut(PurchaseOrderBase):
             else:
                 return self.subtotal * self.gst_rate / 100
         
-        # 2. Sum line item GST
+        # 3. Global GST not set at all → sum line item GST
         if self.line_items:
             return sum(li.gst_amount for li in self.line_items)
             
