@@ -49,6 +49,7 @@ class CreditNoteCreate(BaseModel):
     sale_id: Optional[int] = None
     wo_sale_id: Optional[int] = None
     invoice_number: Optional[str] = None
+    # Historical/manual invoices may not have an available date.
     invoice_date: Optional[date] = None
     po_number: Optional[str] = None
     client_name: str
