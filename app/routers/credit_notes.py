@@ -102,7 +102,11 @@ def get_credit_note(cn_id: int, db: Session = Depends(get_db)):
 # ── Create ───────────────────────────────────────────────────────────────────
 
 @router.post("", response_model=CreditNoteOut)
-def create_credit_note(payload: CreditNoteCreate, db: Session = Depends(get_db)):
+def create_credit_note(
+    payload: CreditNoteCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_for_write),
+):
     if payload.sale_type.upper() not in ("PO", "WO"):
         raise HTTPException(status_code=400, detail="sale_type must be PO or WO")
     # sale_id/wo_sale_id are deliberately optional: historical invoices may
