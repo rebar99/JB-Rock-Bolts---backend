@@ -293,6 +293,7 @@ async def lifespan(app: FastAPI):
                             sale_id INT NULL,
                             wo_sale_id INT NULL,
                             invoice_number VARCHAR(50) NULL,
+                            invoice_date DATE NULL,
                             po_number VARCHAR(100) NULL,
                             client_name VARCHAR(200) NOT NULL,
                             project VARCHAR(300) NULL,
@@ -328,6 +329,15 @@ async def lifespan(app: FastAPI):
                     """))
                 except Exception as ce:
                     logger.warning(f"Credit notes table creation: {ce}")
+
+            # Historical/manual credit notes retain their original invoice date.
+            try:
+                conn.execute(text("SELECT invoice_date FROM credit_notes LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("ALTER TABLE credit_notes ADD COLUMN invoice_date DATE NULL AFTER invoice_number"))
+                except Exception:
+                    pass
 
     except Exception as e:
         logger.error(f"Error applying schema updates: {e}")

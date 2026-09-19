@@ -126,6 +126,7 @@ def create_credit_note(
         raise HTTPException(status_code=404, detail="Selected invoice was not found")
 
     invoice_number = source_sale.invoice_number if source_sale else payload.invoice_number
+    invoice_date = getattr(source_sale, "invoice_date", None) if source_sale else payload.invoice_date
     po_number = (getattr(source_sale, "po_number", None) or getattr(source_sale, "wo_number", None)) if source_sale else payload.po_number
     client_name = source_sale.client_name if source_sale else payload.client_name
     project = getattr(source_sale, "project", None) if source_sale else payload.project
@@ -141,6 +142,7 @@ def create_credit_note(
         sale_id=payload.sale_id,
         wo_sale_id=payload.wo_sale_id,
         invoice_number=invoice_number,
+        invoice_date=invoice_date,
         po_number=po_number,
         client_name=client_name,
         project=project,
@@ -224,7 +226,7 @@ def update_credit_note(
         cn.status = payload.status
     if payload.updated_by is not None:
         cn.updated_by = payload.updated_by
-    for field in ("sale_id", "wo_sale_id", "invoice_number", "po_number", "client_name", "project"):
+    for field in ("sale_id", "wo_sale_id", "invoice_number", "invoice_date", "po_number", "client_name", "project"):
         value = getattr(payload, field)
         if value is not None:
             setattr(cn, field, value)

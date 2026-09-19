@@ -901,6 +901,7 @@ class CreditNote(Base):
 
     # Denormalised for fast listing (copied from original sale at creation)
     invoice_number = Column(String(50), nullable=True)
+    invoice_date = Column(Date, nullable=True)
     po_number = Column(String(100), nullable=True)
     client_name = Column(String(200), nullable=False)
     project = Column(String(300), nullable=True)
