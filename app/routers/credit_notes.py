@@ -126,7 +126,9 @@ def create_credit_note(payload: CreditNoteCreate, db: Session = Depends(get_db))
     client_name = source_sale.client_name if source_sale else payload.client_name
     project = getattr(source_sale, "project", None) if source_sale else payload.project
 
-    cn_number = generate_credit_note_number(db)
+    cn_number = (payload.cn_number or "").strip() or generate_credit_note_number(db)
+    if db.query(CreditNote.id).filter(CreditNote.cn_number == cn_number).first():
+        raise HTTPException(status_code=400, detail="Credit Note Number already exists")
 
     cn = CreditNote(
         cn_number=cn_number,

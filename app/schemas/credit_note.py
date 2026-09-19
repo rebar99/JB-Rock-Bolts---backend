@@ -44,6 +44,7 @@ class CreditNoteItemOut(BaseModel):
 
 class CreditNoteCreate(BaseModel):
     cn_date: date
+    cn_number: Optional[str] = None
     sale_type: str
     sale_id: Optional[int] = None
     wo_sale_id: Optional[int] = None
