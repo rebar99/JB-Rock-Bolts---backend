@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session, joinedload
 from typing import Optional
 from datetime import datetime
 from app.database import get_db
-from app.models.models import WorkOrder, WorkOrderSale, WorkOrderSaleItem, WOItemMasterItem
+from app.models.models import WorkOrder, WorkOrderSale, WorkOrderSaleItem, WOItemMasterItem, CreditNote
 from app.schemas.work_order_reports import (
     WorkOrderReportRow, WorkOrderReportOut, WorkOrderSaleReportRow, WorkOrderSaleReportOut,
 )
@@ -162,6 +162,18 @@ def get_work_order_sales_report(
             grand_total=round(row_price, 2),
             payment_status=s.payment_status.value if hasattr(s.payment_status, 'value') else str(s.payment_status),
         ))
+
+    cn_q = db.query(CreditNote).filter(
+        CreditNote.sale_type == "WO", CreditNote.is_deleted == False,
+        CreditNote.status != "Cancelled",
+    )
+    if from_date:
+        cn_q = cn_q.filter(CreditNote.cn_date >= from_date.date())
+    if to_date:
+        cn_q = cn_q.filter(CreditNote.cn_date <= to_date.date())
+    if client and client.lower() != "all":
+        cn_q = cn_q.filter(CreditNote.client_name.ilike(f"%{client}%"))
+    total_revenue += sum(float(cn.total_amount or 0) for cn in cn_q.all())
 
     record_count = len(sales)
     avg_order_value = total_revenue / record_count if record_count else 0

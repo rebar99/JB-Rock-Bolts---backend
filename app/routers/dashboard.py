@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.database import get_db
-from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus, ItemMasterItem, User, WorkOrderSale
+from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus, ItemMasterItem, User, WorkOrderSale, CreditNote
 from app.utils.auth import get_current_user
 from app.schemas.dashboard import DashboardStats, ChartData, ChartDataPoint, MonthlyTrend, RecentSale
 from app.utils.helpers import (
@@ -186,7 +186,18 @@ def get_stats(gst: int = 1, db: Session = Depends(get_db)):
         else:
             wo_revenue += wo_taxable + wo_freight
 
-    total_revenue = round(po_revenue + wo_revenue, 2)
+    # Credit notes are separate, signed financial adjustments.  This query is
+    # intentionally executed on every request, so edits/cancellations and a
+    # browser refresh can never leave a cached dashboard amount behind.
+    credit_notes = db.query(CreditNote).filter(
+        CreditNote.is_deleted == False,
+        CreditNote.status != "Cancelled",
+    ).all()
+    if gst == 1:
+        credit_adjustment = sum(float(cn.total_amount or 0) for cn in credit_notes)
+    else:
+        credit_adjustment = sum(float(cn.taxable_amount or 0) for cn in credit_notes)
+    total_revenue = round(po_revenue + wo_revenue + credit_adjustment, 2)
 
 
     # Total number of dispatches

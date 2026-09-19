@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session, joinedload
 from typing import Optional
 from datetime import datetime
 from app.database import get_db
-from app.models.models import Record, PurchaseOrder, Sale, POLineItem, SaleDispatch, WorkOrder
+from app.models.models import Record, PurchaseOrder, Sale, POLineItem, SaleDispatch, WorkOrder, CreditNote
 from app.schemas.reports import (
     ReportOut, ReportRow, FulfillmentReportOut, FulfillmentReportRow,
     PendingPOReportOut, PendingPORow, POFulfillmentSummaryOut, DispatchHistoryRow,
@@ -638,6 +638,20 @@ def get_report(
             pending_qty=pending_qty,
             uom=po.uom if po else "Nos",
         ))
+
+    # Keep original sales as rows, but include live signed credit-note
+    # adjustments in the revenue summary (including manual old invoices).
+    cn_q = db.query(CreditNote).filter(
+        CreditNote.sale_type == "PO", CreditNote.is_deleted == False,
+        CreditNote.status != "Cancelled",
+    )
+    if from_date:
+        cn_q = cn_q.filter(CreditNote.cn_date >= from_date.date())
+    if to_date:
+        cn_q = cn_q.filter(CreditNote.cn_date <= to_date.date())
+    if client and client.lower() != "all":
+        cn_q = cn_q.filter(CreditNote.client_name.ilike(f"%{client}%"))
+    total_revenue += sum(float(cn.total_amount or 0) for cn in cn_q.all())
 
     record_count = len(sales)
     avg_order_value = total_revenue / record_count if record_count else 0

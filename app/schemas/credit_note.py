@@ -55,11 +55,20 @@ class CreditNoteCreate(BaseModel):
     taxable_amount: float = 0
     gst_amount: float = 0
     total_amount: float = 0
-    items: List[CreditNoteItemCreate]
+    # A credit note may refer to an invoice that predates this application.
+    # In that case neither sale id is present and the invoice details below
+    # are the user-entered source of truth.
+    items: List[CreditNoteItemCreate] = []
     created_by: Optional[str] = None
 
 
 class CreditNoteUpdate(BaseModel):
+    sale_id: Optional[int] = None
+    wo_sale_id: Optional[int] = None
+    invoice_number: Optional[str] = None
+    po_number: Optional[str] = None
+    client_name: Optional[str] = None
+    project: Optional[str] = None
     cn_date: Optional[date] = None
     reason: Optional[str] = None
     taxable_amount: Optional[float] = None
