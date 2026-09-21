@@ -16,7 +16,7 @@ from app.models.models import (
     Sale, SaleItem, SaleActivity, SaleDispatch, SaleDispatchItem,
     Record, SystemLog, WorkOrder, WOLineItem, WorkOrderSale,
     WorkOrderSaleItem, WorkOrderSaleActivity, WorkOrderSaleDispatch,
-    WorkOrderSaleDispatchItem, UserSession, CompanyAddress
+    WorkOrderSaleDispatchItem, CreditNote, CreditNoteItem, UserSession, CompanyAddress
 )
 
 router = APIRouter(prefix="/api/system", tags=["System"])
@@ -49,6 +49,11 @@ MODELS = [
     WorkOrderSaleActivity,
     WorkOrderSaleDispatch,
     WorkOrderSaleDispatchItem,
+    # Credit-note rows depend on PO/WO sales. Keep them after both sale
+    # sources so restore inserts parents first; reversed delete order then
+    # removes credit notes before their linked sales.
+    CreditNote,
+    CreditNoteItem,
     Record,
     SystemLog,
     UserSession
@@ -180,6 +185,8 @@ async def import_database(
             'sale_dispatch_items': ['dispatch_id', 'item'],
             'work_order_sale_dispatches': ['sale_id', 'dispatched_at'],
             'work_order_sale_dispatch_items': ['dispatch_id', 'item'],
+            'credit_notes': ['cn_number'],
+            'credit_note_items': ['credit_note_id', 'item', 'credit_qty', 'unit_price'],
         }
 
         records_inserted = 0
