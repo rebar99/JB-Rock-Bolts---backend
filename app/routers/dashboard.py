@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.database import get_db
-from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus, ItemMasterItem, User, WorkOrderSale, CreditNote
+from app.models.models import Sale, PurchaseOrder, Client, PaymentStatus, ItemMasterItem, User, WorkOrder, WorkOrderSale, CreditNote
 from app.utils.auth import get_current_user
 from app.schemas.dashboard import DashboardStats, ChartData, ChartDataPoint, MonthlyTrend, RecentSale
 from app.utils.helpers import (
@@ -86,6 +86,14 @@ def get_monthly_product_sales(year: int = None, month: int = None, gst: int = 1,
         sales_query = sales_query.filter(func.month(func.coalesce(Sale.invoice_date, Sale.created_at)) == month)
         
     sales = sales_query.all()
+    wo_sales_query = (
+        db.query(WorkOrderSale).options(joinedload(WorkOrderSale.items))
+        .filter(WorkOrderSale.is_deleted == False)
+        .filter(func.year(func.coalesce(WorkOrderSale.invoice_date, WorkOrderSale.created_at)) == target_year)
+    )
+    if month:
+        wo_sales_query = wo_sales_query.filter(func.month(func.coalesce(WorkOrderSale.invoice_date, WorkOrderSale.created_at)) == month)
+    wo_sales = wo_sales_query.all()
 
     if month:
         num_days = calendar.monthrange(target_year, month)[1]
@@ -114,6 +122,19 @@ def get_monthly_product_sales(year: int = None, month: int = None, gst: int = 1,
             time_product_revenue[t_idx][product_type] = time_product_revenue[t_idx].get(product_type, 0.0) + revenue
             product_totals[product_type] = product_totals.get(product_type, 0.0) + revenue
 
+    # Work Order invoices use the same category and live-tax calculation.
+    for s in wo_sales:
+        dt = s.invoice_date or s.created_at
+        if not dt:
+            continue
+        t_idx = dt.day - 1 if month else dt.month - 1
+        for it in s.items:
+            product_type = get_category(it.item)
+            taxable, gst_amt = compute_line_taxable_and_gst(it.quantity, it.unit_price, it.gst_rate)
+            revenue = taxable + gst_amt if gst == 1 else taxable
+            time_product_revenue[t_idx][product_type] = time_product_revenue[t_idx].get(product_type, 0.0) + revenue
+            product_totals[product_type] = product_totals.get(product_type, 0.0) + revenue
+
     ranked_products = [p for p, _ in sorted(product_totals.items(), key=lambda kv: kv[1], reverse=True)]
     products = ranked_products[:TOP_PRODUCTS_LIMIT]
 
@@ -127,18 +148,14 @@ def get_monthly_product_sales(year: int = None, month: int = None, gst: int = 1,
     return {"year": target_year, "months": time_labels, "products": products, "data": data}
 
 
-@router.get("/clients", response_model=List[str])
+@router.get("/clients")
 def get_dashboard_clients(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Client names behind the "Total Clients" stat card — sourced from
-    Purchase Orders only (same PurchaseOrder.client_name + normalize_client_name
-    logic as the count in get_stats() below), so the dialog listing these
-    names always adds up to exactly the number shown on the card, and never
-    includes a client that only exists as an unused Client record (e.g. one
-    added via Work Orders or the "Add New Client" dialog but never used on
-    a PO).
-    """
+    """Clients actually used in PO and WO records, kept separately for drill-down."""
     all_po_clients = db.query(PurchaseOrder.client_name).filter(PurchaseOrder.is_deleted == False).all()
-    return dedupe_names_by_normalized_key([c[0] for c in all_po_clients], normalize_client_name)
+    all_wo_clients = db.query(WorkOrder.client_name).filter(WorkOrder.is_deleted == False).all()
+    po_clients = dedupe_names_by_normalized_key([c[0] for c in all_po_clients], normalize_client_name)
+    wo_clients = dedupe_names_by_normalized_key([c[0] for c in all_wo_clients], normalize_client_name)
+    return {"po_clients": po_clients, "wo_clients": wo_clients}
 
 
 @router.get("/stats", response_model=DashboardStats)
@@ -186,30 +203,40 @@ def get_stats(gst: int = 1, db: Session = Depends(get_db)):
         else:
             wo_revenue += wo_taxable + wo_freight
 
-    # Credit notes are separate, signed financial adjustments.  This query is
-    # intentionally executed on every request, so edits/cancellations and a
-    # browser refresh can never leave a cached dashboard amount behind.
+    # Credit notes are signed adjustments: Quantity Less reduces the total
+    # while Quantity Excess increases it. Show this separately in the card so
+    # its inclusion in Total Sales is always transparent.
     credit_notes = db.query(CreditNote).filter(
         CreditNote.is_deleted == False,
         CreditNote.status != "Cancelled",
     ).all()
-    if gst == 1:
-        credit_adjustment = sum(float(cn.total_amount or 0) for cn in credit_notes)
-    else:
-        credit_adjustment = sum(float(cn.taxable_amount or 0) for cn in credit_notes)
-    total_revenue = round(po_revenue + wo_revenue + credit_adjustment, 2)
+    credit_note_adjustment = sum(
+        float(cn.total_amount if gst == 1 else cn.taxable_amount) or 0
+        for cn in credit_notes
+    )
+    total_revenue = round(po_revenue + wo_revenue + credit_note_adjustment, 2)
 
 
-    # Total number of dispatches
-    total_orders = len(all_sales)
-    # Total unique clients with smart normalization (ignores M/s, LTD, LIMITED, casing)
+    # Total invoices and clients are combined across Supply (PO) and Job Work (WO).
+    total_orders = len(all_sales) + len(all_wo_sales)
+    # Total unique clients with smart normalization (ignores M/s, LTD, LIMITED, casing).
     all_po_clients = db.query(PurchaseOrder.client_name).filter(PurchaseOrder.is_deleted == False).all()
-    normalized_names = set()
+    all_wo_clients = db.query(WorkOrder.client_name).filter(WorkOrder.is_deleted == False).all()
+    po_normalized_names = set()
+    wo_normalized_names = set()
     for row in all_po_clients:
         n = normalize_client_name(row.client_name)
         if n:
-            normalized_names.add(n)
-    total_clients = len(normalized_names) or 0
+            po_normalized_names.add(n)
+    for row in all_wo_clients:
+        n = normalize_client_name(row.client_name)
+        if n:
+            wo_normalized_names.add(n)
+    total_clients = len(po_normalized_names | wo_normalized_names)
+    purchase_orders = db.query(PurchaseOrder).filter(PurchaseOrder.is_deleted == False).all()
+    work_orders = db.query(WorkOrder).filter(WorkOrder.is_deleted == False).all()
+    completed_po_count = sum(1 for o in purchase_orders if o.delivery_status == "Delivered")
+    completed_wo_count = sum(1 for o in work_orders if o.status == "Completed")
 
     # Delivered orders should be those that have enough challans AND the PO is finished
     delivered_orders = 0
@@ -240,10 +267,23 @@ def get_stats(gst: int = 1, db: Session = Depends(get_db)):
 
     return DashboardStats(
         total_revenue=total_revenue,
+        po_revenue=round(po_revenue, 2),
+        wo_revenue=round(wo_revenue, 2),
+        credit_note_adjustment=round(credit_note_adjustment, 2),
         total_orders=total_orders,
         total_clients=total_clients,
         delivered_orders=delivered_orders,
         pending_payments=pending_payments,
+        po_invoice_count=len(all_sales),
+        wo_invoice_count=len(all_wo_sales),
+        po_client_count=len(po_normalized_names),
+        wo_client_count=len(wo_normalized_names),
+        po_order_count=len(purchase_orders),
+        wo_order_count=len(work_orders),
+        completed_po_count=completed_po_count,
+        pending_po_count=len(purchase_orders) - completed_po_count,
+        completed_wo_count=completed_wo_count,
+        pending_wo_count=len(work_orders) - completed_wo_count,
     )
 
 
@@ -311,6 +351,22 @@ def get_charts(year: int = None, month: int = None, gst: int = 1, db: Session = 
     
     product_totals = {}
     for r in sales_items_raw:
+        cat = get_category(r.item)
+        product_totals[cat] = product_totals.get(cat, 0.0) + float(r.total or 0)
+
+    # Job Work invoice line-items are part of the same product-sales donut.
+    from app.models.models import WorkOrderSaleItem
+    wo_item_taxable = WorkOrderSaleItem.quantity * WorkOrderSaleItem.unit_price
+    wo_item_total = wo_item_taxable + (wo_item_taxable * WorkOrderSaleItem.gst_rate / 100) if gst == 1 else wo_item_taxable
+    wo_items_query = (
+        db.query(WorkOrderSaleItem.item, func.sum(wo_item_total).label("total"))
+        .join(WorkOrderSale, WorkOrderSale.id == WorkOrderSaleItem.sale_id)
+        .filter(WorkOrderSale.is_deleted == False)
+        .filter(func.year(func.coalesce(WorkOrderSale.invoice_date, WorkOrderSale.created_at)) == target_year)
+    )
+    if month:
+        wo_items_query = wo_items_query.filter(func.month(func.coalesce(WorkOrderSale.invoice_date, WorkOrderSale.created_at)) == month)
+    for r in wo_items_query.group_by(WorkOrderSaleItem.item).all():
         cat = get_category(r.item)
         product_totals[cat] = product_totals.get(cat, 0.0) + float(r.total or 0)
         
@@ -452,5 +508,25 @@ def get_recent_sales(limit: int = 6, gst: int = 1, db: Session = Depends(get_db)
             date=r.created_at.isoformat() if r.created_at else "",
             invoice_number=cast(str, r.invoice_number) if r.invoice_number else None,
             po_number=cast(str, r.po_number) if r.po_number else None,
+            sale_type="PO",
         ))
-    return res
+    wo_rows = (
+        db.query(WorkOrderSale).options(joinedload(WorkOrderSale.items))
+        .filter(WorkOrderSale.is_deleted == False)
+        .order_by(WorkOrderSale.created_at.desc()).limit(limit).all()
+    )
+    for r in wo_rows:
+        taxable, gst_amount = compute_sale_taxable_and_gst(r.items)
+        freight = float(r.freight or 0)
+        price = compute_sale_grand_total(taxable, gst_amount, freight) if gst == 1 else taxable + freight
+        sale_date = r.invoice_date or r.created_at
+        res.append(RecentSale(
+            id=cast(int, r.id), client_name=cast(str, r.client_name) or "Unknown Client",
+            product=r.items_display, price=price,
+            payment_status=r.payment_status.value if hasattr(r.payment_status, "value") else str(r.payment_status),
+            delivery_status=r.delivery_status or "Not Delivered",
+            date=sale_date.isoformat() if sale_date else "",
+            invoice_number=cast(str, r.invoice_number) if r.invoice_number else None,
+            po_number=cast(str, r.wo_number) if r.wo_number else None, sale_type="WO",
+        ))
+    return sorted(res, key=lambda row: row.date or "", reverse=True)[:limit]

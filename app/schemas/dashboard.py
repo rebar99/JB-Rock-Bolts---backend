@@ -4,10 +4,23 @@ from typing import List, Any, Dict, Optional
 
 class DashboardStats(BaseModel):
     total_revenue: float
+    po_revenue: float = 0
+    wo_revenue: float = 0
+    credit_note_adjustment: float = 0
     total_orders: int
     total_clients: int
     delivered_orders: int
     pending_payments: int
+    po_invoice_count: int = 0
+    wo_invoice_count: int = 0
+    po_client_count: int = 0
+    wo_client_count: int = 0
+    po_order_count: int = 0
+    wo_order_count: int = 0
+    completed_po_count: int = 0
+    pending_po_count: int = 0
+    completed_wo_count: int = 0
+    pending_wo_count: int = 0
 
 
 class ChartDataPoint(BaseModel):
@@ -37,3 +50,4 @@ class RecentSale(BaseModel):
     date: str
     invoice_number: Optional[str] = None
     po_number: Optional[str] = None
+    sale_type: str = "PO"
