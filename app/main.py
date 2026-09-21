@@ -278,6 +278,21 @@ async def lifespan(app: FastAPI):
                         except Exception:
                             pass
 
+            # Credit notes use the same 24-hour Recently Deleted lifecycle.
+            for col, dtype in [
+                ("is_deleted", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("deleted_at", "DATETIME NULL"),
+                ("deleted_by", "VARCHAR(100) NULL"),
+                ("permanent_delete_at", "DATETIME NULL"),
+            ]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM credit_notes LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE credit_notes ADD COLUMN {col} {dtype}"))
+                    except Exception:
+                        pass
+
             # ── Credit Notes tables (created by Base.metadata.create_all above,
             #    but safe-create here for clarity and idempotency) ──────────────
             try:
@@ -308,7 +323,8 @@ async def lifespan(app: FastAPI):
                             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                             is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
                             deleted_at DATETIME NULL,
-                            deleted_by VARCHAR(100) NULL
+                            deleted_by VARCHAR(100) NULL,
+                            permanent_delete_at DATETIME NULL
                         )
                     """))
                     conn.execute(text("""
@@ -365,7 +381,7 @@ async def lifespan(app: FastAPI):
     def purge_expired_deleted_records():
         """Har 1 ghante mein check karo — jis record ka permanent_delete_at past mein
         aa gaya, usse permanently delete karo (including associated files)."""
-        from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale
+        from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale, CreditNote
         db_purge = SessionLocal()
         try:
             now_naive = datetime.utcnow()
@@ -444,6 +460,16 @@ async def lifespan(app: FastAPI):
                                 except Exception:
                                     pass
                 db_purge.delete(wos)
+
+            # Purge expired Credit Notes and their line items (relationship
+            # cascade deletes children) after their 24-hour restore window.
+            expired_credit_notes = db_purge.query(CreditNote).filter(
+                CreditNote.is_deleted == True,
+                CreditNote.permanent_delete_at <= now_naive,
+            ).all()
+            for cn in expired_credit_notes:
+                logger.info(f"[AutoPurge] Permanently deleting Credit Note id={cn.id} cn={cn.cn_number}")
+                db_purge.delete(cn)
             db_purge.flush()
 
             db_purge.commit()

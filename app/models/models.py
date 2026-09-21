@@ -924,6 +924,7 @@ class CreditNote(Base):
     is_deleted = Column(Boolean, default=False, nullable=False, server_default="0")
     deleted_at = Column(DateTime, nullable=True)
     deleted_by = Column(String(100), nullable=True)
+    permanent_delete_at = Column(DateTime, nullable=True)
 
     # Relationships
     sale = relationship("Sale", foreign_keys=[sale_id], backref="credit_notes")

@@ -183,6 +183,7 @@ class POPendingDetail(BaseModel):
     dispatched_qty: float
     pending_qty: float
     rate: float
+    delivered_value: float = 0
     pending_value: float
 
 class ClientPendingDetail(BaseModel):
@@ -191,6 +192,7 @@ class ClientPendingDetail(BaseModel):
     total_ordered_qty: float
     total_dispatched_qty: float
     pending_qty: float
+    delivered_value: float = 0
     pending_value: float
     pos: List[POPendingDetail]
 
@@ -200,6 +202,7 @@ class ProductPendingRow(BaseModel):
     total_ordered_qty: float
     total_dispatched_qty: float
     pending_qty: float
+    delivered_value: float = 0
     pending_value: float
     client_count: int
     clients: List[ClientPendingDetail]
@@ -207,6 +210,7 @@ class ProductPendingRow(BaseModel):
 class ProductPendingSummary(BaseModel):
     total_pending_qty: float
     total_pending_value: float
+    total_delivered_value: float = 0
     total_products: int
     total_clients: int
 

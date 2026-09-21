@@ -1,7 +1,7 @@
 ﻿from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.database import get_db
 from app.models.models import CreditNote, CreditNoteItem, Sale, WorkOrderSale, SaleItem, WorkOrderSaleItem
@@ -279,6 +279,7 @@ def cancel_credit_note(
     cn.is_deleted = True
     cn.deleted_at = datetime.utcnow()
     cn.deleted_by = current_user.username if hasattr(current_user, "username") else str(current_user.id)
+    cn.permanent_delete_at = cn.deleted_at + timedelta(hours=24)
     cn.status = "Cancelled"
     db.commit()
-    return {"detail": f"Credit Note {cn.cn_number} cancelled"}
+    return {"detail": f"Credit Note {cn.cn_number} moved to Recently Deleted"}

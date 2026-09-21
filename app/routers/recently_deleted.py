@@ -1,6 +1,6 @@
 """
 Recently Deleted / Recycle Bin Router
-Admin-only: list, restore, permanently delete soft-deleted Sales, POs, WOs, WO Sales.
+Admin-only: list, restore, permanently delete soft-deleted Sales, POs, WOs, WO Sales and Credit Notes.
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Header, Query
 from sqlalchemy.orm import Session
@@ -10,7 +10,7 @@ from pydantic import BaseModel
 import os
 
 from app.database import get_db
-from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale
+from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale, CreditNote
 from app.utils.auth import require_admin
 from app.utils.helpers import log_activity, recalc_po_delivered_quantities, recalc_wo_completed_quantities
 
@@ -47,6 +47,8 @@ def _build_record(record_type, obj):
         number = obj.po_number
     elif record_type == "work_order":
         number = obj.wo_number
+    elif record_type == "credit_note":
+        number = obj.cn_number
     else:  # work_order_sale
         number = obj.invoice_number or f"WO Sale #{obj.id}"
 
@@ -66,7 +68,7 @@ def _build_record(record_type, obj):
 
 @router.get("", response_model=List[DeletedRecordOut])
 def list_recently_deleted(
-    module: Optional[str] = Query(None, description="Filter: sale | purchase_order | work_order | work_order_sale"),
+    module: Optional[str] = Query(None, description="Filter: sale | purchase_order | work_order | work_order_sale | credit_note"),
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
@@ -113,6 +115,16 @@ def list_recently_deleted(
         )
         for wos in wo_sales:
             records.append(_build_record("work_order_sale", wos))
+
+    if module in (None, "all", "credit_note"):
+        credit_notes = (
+            db.query(CreditNote)
+            .filter(CreditNote.is_deleted == True, CreditNote.permanent_delete_at > now)
+            .order_by(CreditNote.deleted_at.desc())
+            .all()
+        )
+        for cn in credit_notes:
+            records.append(_build_record("credit_note", cn))
 
     records.sort(key=lambda r: r.deleted_at or datetime.min, reverse=True)
     return records
@@ -210,6 +222,24 @@ def restore_record(
             user.name, obj.id, entity_name=obj.invoice_number)
         return _build_record("work_order_sale", obj)
 
+    elif record_type == "credit_note":
+        obj = db.query(CreditNote).filter(CreditNote.id == record_id, CreditNote.is_deleted == True).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Deleted Credit Note not found.")
+        if obj.permanent_delete_at and obj.permanent_delete_at < now:
+            raise HTTPException(status_code=410, detail="Credit Note has already expired.")
+        obj.is_deleted = False
+        obj.deleted_at = None
+        obj.deleted_by = None
+        obj.permanent_delete_at = None
+        obj.status = "Issued"
+        db.commit()
+        db.refresh(obj)
+        log_activity(db, "Credit Note Restored", "CreditNote",
+            f"Restored Credit Note {obj.cn_number} from Recently Deleted.",
+            user.name, obj.id, entity_name=obj.cn_number)
+        return _build_record("credit_note", obj)
+
     else:
         raise HTTPException(status_code=400, detail=f"Invalid record_type '{record_type}'.")
 
@@ -284,6 +314,16 @@ def permanent_delete_record(
         db.commit()
         log_activity(db, "WO Sale Permanently Deleted", "WorkOrderSale",
             f"Admin permanently deleted WO Sale {label}.", user.name, record_id, entity_name=label)
+
+    elif record_type == "credit_note":
+        obj = db.query(CreditNote).filter(CreditNote.id == record_id, CreditNote.is_deleted == True).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Deleted Credit Note not found.")
+        label = obj.cn_number
+        db.delete(obj)
+        db.commit()
+        log_activity(db, "Credit Note Permanently Deleted", "CreditNote",
+            f"Admin permanently deleted Credit Note {label}.", user.name, record_id, entity_name=label)
 
     else:
         raise HTTPException(status_code=400, detail=f"Invalid record_type '{record_type}'.")

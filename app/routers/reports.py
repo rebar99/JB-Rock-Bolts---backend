@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session, joinedload
 from typing import Optional
 from datetime import datetime
 from app.database import get_db
-from app.models.models import Record, PurchaseOrder, Sale, POLineItem, SaleDispatch, WorkOrder, CreditNote
+from app.models.models import Record, PurchaseOrder, Sale, SaleItem, POLineItem, SaleDispatch, WorkOrder, CreditNote
 from app.schemas.reports import (
     ReportOut, ReportRow, FulfillmentReportOut, FulfillmentReportRow,
     PendingPOReportOut, PendingPORow, POFulfillmentSummaryOut, DispatchHistoryRow,
@@ -248,6 +248,26 @@ def get_product_pending_report(
                 return mapped_name
         return "Uncategorized"
         
+    # Delivered payment follows the value saved on actual Sales invoices,
+    # rather than the PO's original rate. Thus an intentionally zero-rated
+    # invoice remains zero here too. Sale items are linked to PO line items,
+    # so multiple invoices for one PO line are summed exactly once.
+    invoiced_value_by_line_id = {}
+    invoice_items = (
+        db.query(SaleItem.line_item_id, SaleItem.quantity, SaleItem.unit_price)
+        .join(Sale, Sale.id == SaleItem.sale_id)
+        .filter(
+            Sale.is_deleted == False,
+            SaleItem.line_item_id.isnot(None),
+        )
+        .all()
+    )
+    for line_item_id, quantity, unit_price in invoice_items:
+        invoiced_value_by_line_id[line_item_id] = (
+            invoiced_value_by_line_id.get(line_item_id, 0.0)
+            + float(quantity or 0) * float(unit_price or 0)
+        )
+
     pos = db.query(PurchaseOrder).options(joinedload(PurchaseOrder.line_items)).filter(PurchaseOrder.is_deleted == False).all()
 
     raw_items = []
@@ -279,6 +299,7 @@ def get_product_pending_report(
                 
             rate = round(float(li.unit_price or 0), 10)
             pending_value = round(pending * rate, 10)
+            delivered_value = round(invoiced_value_by_line_id.get(li.id, 0.0), 10)
             
             # Filter items based on active status
             if po_status == "Pending" and pending <= 0:
@@ -321,6 +342,7 @@ def get_product_pending_report(
                 "dispatched_qty": dispatched,
                 "pending_qty": pending,
                 "rate": rate,
+                "delivered_value": delivered_value,
                 "pending_value": pending_value
             })
 
@@ -336,6 +358,7 @@ def get_product_pending_report(
             "total_ordered_qty": 0.0,
             "total_dispatched_qty": 0.0,
             "pending_qty": 0.0,
+            "delivered_value": 0.0,
             "pending_value": 0.0,
             "clients": {}
         })
@@ -343,6 +366,7 @@ def get_product_pending_report(
         p_entry["total_ordered_qty"] += item["ordered_qty"]
         p_entry["total_dispatched_qty"] += item["dispatched_qty"]
         p_entry["pending_qty"] += item["pending_qty"]
+        p_entry["delivered_value"] += item["delivered_value"]
         p_entry["pending_value"] += item["pending_value"]
         
         c_entry = p_entry["clients"].setdefault(ck, {
@@ -351,6 +375,7 @@ def get_product_pending_report(
             "total_ordered_qty": 0.0,
             "total_dispatched_qty": 0.0,
             "pending_qty": 0.0,
+            "delivered_value": 0.0,
             "pending_value": 0.0,
             "pos_dict": {}
         })
@@ -358,6 +383,7 @@ def get_product_pending_report(
         c_entry["total_ordered_qty"] += item["ordered_qty"]
         c_entry["total_dispatched_qty"] += item["dispatched_qty"]
         c_entry["pending_qty"] += item["pending_qty"]
+        c_entry["delivered_value"] += item["delivered_value"]
         c_entry["pending_value"] += item["pending_value"]
         
         pon = item["po_number"]
@@ -368,6 +394,7 @@ def get_product_pending_report(
             "ordered_qty": 0.0,
             "dispatched_qty": 0.0,
             "pending_qty": 0.0,
+            "delivered_value": 0.0,
             "pending_value": 0.0,
             "rates": []
         })
@@ -375,12 +402,14 @@ def get_product_pending_report(
         po_entry["ordered_qty"] += item["ordered_qty"]
         po_entry["dispatched_qty"] += item["dispatched_qty"]
         po_entry["pending_qty"] += item["pending_qty"]
+        po_entry["delivered_value"] += item["delivered_value"]
         po_entry["pending_value"] += item["pending_value"]
         po_entry["rates"].append(item["rate"])
 
     products_list = []
     total_pending_qty = 0.0
     total_pending_value = 0.0
+    total_delivered_value = 0.0
     active_client_keys = set()
     active_products = set()
     
@@ -390,6 +419,7 @@ def get_product_pending_report(
             c_data["total_ordered_qty"] = round(c_data["total_ordered_qty"], 10)
             c_data["total_dispatched_qty"] = round(c_data["total_dispatched_qty"], 10)
             c_data["pending_qty"] = round(c_data["pending_qty"], 10)
+            c_data["delivered_value"] = round(c_data["delivered_value"], 2)
             c_data["pending_value"] = round(c_data["pending_value"], 2)
             
             pos_list = []
@@ -397,6 +427,7 @@ def get_product_pending_report(
                 po_row["ordered_qty"] = round(po_row["ordered_qty"], 10)
                 po_row["dispatched_qty"] = round(po_row["dispatched_qty"], 10)
                 po_row["pending_qty"] = round(po_row["pending_qty"], 10)
+                po_row["delivered_value"] = round(po_row["delivered_value"], 2)
                 po_row["pending_value"] = round(po_row["pending_value"], 2)
                 
                 # Calculate weighted average rate
@@ -429,6 +460,7 @@ def get_product_pending_report(
         p_data["total_ordered_qty"] = round(p_data["total_ordered_qty"], 10)
         p_data["total_dispatched_qty"] = round(p_data["total_dispatched_qty"], 10)
         p_data["pending_qty"] = round(p_data["pending_qty"], 10)
+        p_data["delivered_value"] = round(p_data["delivered_value"], 2)
         p_data["pending_value"] = round(p_data["pending_value"], 2)
         
         products_list.append(p_data)
@@ -440,6 +472,7 @@ def get_product_pending_report(
             
         total_pending_qty += p_data["pending_qty"]
         total_pending_value += p_data["pending_value"]
+        total_delivered_value += p_data["delivered_value"]
 
     client_names_sorted = sorted(list(distinct_clients), key=lambda x: x.lower())
     product_labels_sorted = sorted(list(distinct_products), key=lambda x: x.lower())
@@ -447,6 +480,7 @@ def get_product_pending_report(
     summary = ProductPendingSummary(
         total_pending_qty=round(total_pending_qty, 10),
         total_pending_value=round(total_pending_value, 2),
+        total_delivered_value=round(total_delivered_value, 2),
         total_products=len(active_products),
         total_clients=len(active_client_keys)
     )
@@ -484,38 +518,39 @@ def export_product_pending_report(
     
     # Sheet 1: Product Summary
     ws1 = wb.create_sheet("Product Summary")
-    headers1 = ["Product / Diameter", "Total Ordered Qty", "Total Dispatched Qty", "Pending Qty", "Pending Value (₹)", "Clients Count"]
+    headers1 = ["Product / Diameter", "Total Ordered Qty", "Total Dispatched Qty", "Pending Qty", "Delivered Payment (Without GST) (₹)", "Pending Value (Without GST) (₹)", "Clients Count"]
     ws1.append(headers1)
     style_header_row(ws1, len(headers1))
     for p in data.products:
-        ws1.append([p.product_label, p.total_ordered_qty, p.total_dispatched_qty, p.pending_qty, p.pending_value, p.client_count])
+        ws1.append([p.product_label, p.total_ordered_qty, p.total_dispatched_qty, p.pending_qty, p.delivered_value, p.pending_value, p.client_count])
     # Add a Total row
     ws1.append([])
     ws1.append(["TOTAL", 
                 sum(p.total_ordered_qty for p in data.products),
                 sum(p.total_dispatched_qty for p in data.products),
                 sum(p.pending_qty for p in data.products),
+                sum(p.delivered_value for p in data.products),
                 sum(p.pending_value for p in data.products),
                 ""])
                 
     # Sheet 2: Client Details
     ws2 = wb.create_sheet("Client Details")
-    headers2 = ["Product / Diameter", "Client Name", "Total Ordered Qty", "Total Dispatched Qty", "Pending Qty", "Pending Value (₹)"]
+    headers2 = ["Product / Diameter", "Client Name", "Total Ordered Qty", "Total Dispatched Qty", "Pending Qty", "Delivered Payment (Without GST) (₹)", "Pending Value (Without GST) (₹)"]
     ws2.append(headers2)
     style_header_row(ws2, len(headers2))
     for p in data.products:
         for c in p.clients:
-            ws2.append([p.product_label, c.client_name, c.total_ordered_qty, c.total_dispatched_qty, c.pending_qty, c.pending_value])
+            ws2.append([p.product_label, c.client_name, c.total_ordered_qty, c.total_dispatched_qty, c.pending_qty, c.delivered_value, c.pending_value])
             
     # Sheet 3: PO Details
     ws3 = wb.create_sheet("PO Details")
-    headers3 = ["Product / Diameter", "Client Name", "PO No", "PO Date", "Total Ordered Qty", "Dispatched Qty", "Pending Qty", "Rate (₹)", "Pending Value (₹)"]
+    headers3 = ["Product / Diameter", "Client Name", "PO No", "PO Date", "Total Ordered Qty", "Dispatched Qty", "Pending Qty", "Rate (₹)", "Delivered Payment (Without GST) (₹)", "Pending Value (Without GST) (₹)"]
     ws3.append(headers3)
     style_header_row(ws3, len(headers3))
     for p in data.products:
         for c in p.clients:
             for po in c.pos:
-                ws3.append([p.product_label, c.client_name, po.po_number, po.po_date or "—", po.ordered_qty, po.dispatched_qty, po.pending_qty, po.rate, po.pending_value])
+                ws3.append([p.product_label, c.client_name, po.po_number, po.po_date or "—", po.ordered_qty, po.dispatched_qty, po.pending_qty, po.rate, po.delivered_value, po.pending_value])
                 
     return make_excel_response(wb, f"product-wise-pending-analysis-{po_status.lower()}.xlsx")
 
