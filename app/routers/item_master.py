@@ -4,9 +4,9 @@ from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
 from datetime import datetime
 from app.database import get_db
-from app.models.models import ItemMasterItem, ItemMasterSize, WOItemMasterItem, WOItemMasterSize
+from app.models.models import ItemMasterItem, ItemMasterSize, StorePOItemMasterItem, StorePOItemMasterSize, WOItemMasterItem, WOItemMasterSize
 from app.schemas.item_master import ItemMasterCreate, ItemMasterUpdate, ItemMasterOut, ItemMasterSizeCreate, ItemMasterSizeOut, ItemMasterSizeUpdate
-from app.utils.auth import require_admin
+from app.utils.auth import application_role, get_current_user_from_token, require_admin
 from app.utils.helpers import log_activity
 
 router = APIRouter(prefix="/api/item-master", tags=["Item Master"])
@@ -14,19 +14,36 @@ router = APIRouter(prefix="/api/item-master", tags=["Item Master"])
 ACCESS_DENIED_DETAIL = "Access Denied – Only Admin can manage items."
 
 
+def _require_master_admin(authorization: str, db: Session, master_type: str):
+    """Use the matching application's admin permission for each master.
+
+    Store PO masters must be manageable by a Store Purchase admin even when
+    that user does not hold the unrelated Marketing admin role.
+    """
+    if master_type.upper() == "STORE":
+        user = get_current_user_from_token(authorization=authorization, db=db)
+        if application_role(user, db, "store_purchase") != "admin":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ACCESS_DENIED_DETAIL)
+        return user
+    return require_admin(authorization, db, ACCESS_DENIED_DETAIL)
+
+
+def _master_models(master_type: str):
+    """Return the independent master tables for Marketing, Store, or WO."""
+    if master_type == "WO":
+        return WOItemMasterItem, WOItemMasterSize
+    if master_type == "STORE":
+        return StorePOItemMasterItem, StorePOItemMasterSize
+    return ItemMasterItem, ItemMasterSize
+
+
 @router.get("", response_model=List[ItemMasterOut])
 def list_items(type: str = "PO", db: Session = Depends(get_db)):
-    if type == "WO":
-        return (
-            db.query(WOItemMasterItem)
-            .options(joinedload(WOItemMasterItem.sizes))
-            .order_by(WOItemMasterItem.name)
-            .all()
-        )
+    Model, _ = _master_models(type)
     return (
-        db.query(ItemMasterItem)
-        .options(joinedload(ItemMasterItem.sizes))
-        .order_by(ItemMasterItem.name)
+        db.query(Model)
+        .options(joinedload(Model.sizes))
+        .order_by(Model.name)
         .all()
     )
 
@@ -37,13 +54,13 @@ def create_item(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    require_admin(authorization, db, ACCESS_DENIED_DETAIL)
+    _require_master_admin(authorization, db, payload.type)
 
     name = (payload.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Item name is required.")
 
-    Model = WOItemMasterItem if payload.type == "WO" else ItemMasterItem
+    Model, _ = _master_models(payload.type)
 
     existing = db.query(Model).filter(func.lower(Model.name) == name.lower()).first()
     if existing:
@@ -65,9 +82,9 @@ def update_item(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    require_admin(authorization, db, ACCESS_DENIED_DETAIL)
+    _require_master_admin(authorization, db, payload.type)
 
-    Model = WOItemMasterItem if payload.type == "WO" else ItemMasterItem
+    Model, _ = _master_models(payload.type)
 
     item = db.get(Model, item_id)
     if not item:
@@ -100,9 +117,9 @@ def delete_item(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    require_admin(authorization, db, ACCESS_DENIED_DETAIL)
+    _require_master_admin(authorization, db, type)
 
-    Model = WOItemMasterItem if type == "WO" else ItemMasterItem
+    Model, _ = _master_models(type)
 
     item = db.get(Model, item_id)
     if not item:
@@ -130,10 +147,9 @@ def add_item_size(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    require_admin(authorization, db, ACCESS_DENIED_DETAIL)
+    _require_master_admin(authorization, db, payload.type)
 
-    Model = WOItemMasterItem if payload.type == "WO" else ItemMasterItem
-    SizeModel = WOItemMasterSize if payload.type == "WO" else ItemMasterSize
+    Model, SizeModel = _master_models(payload.type)
 
     item = db.get(Model, item_id)
     if not item:
@@ -167,10 +183,9 @@ def update_item_size(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    require_admin(authorization, db, ACCESS_DENIED_DETAIL)
+    _require_master_admin(authorization, db, payload.type)
 
-    Model = WOItemMasterItem if payload.type == "WO" else ItemMasterItem
-    SizeModel = WOItemMasterSize if payload.type == "WO" else ItemMasterSize
+    Model, SizeModel = _master_models(payload.type)
 
     item = db.get(Model, item_id)
     if not item:
@@ -210,9 +225,9 @@ def delete_item_size(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    require_admin(authorization, db, ACCESS_DENIED_DETAIL)
+    _require_master_admin(authorization, db, type)
 
-    SizeModel = WOItemMasterSize if type == "WO" else ItemMasterSize
+    _, SizeModel = _master_models(type)
 
     row = db.query(SizeModel).filter(SizeModel.id == size_id, SizeModel.item_id == item_id).first()
     if not row:

@@ -22,6 +22,7 @@ class ReportRow(BaseModel):
     price: float
     subtotal: float = 0
     gst_amount: float = 0
+    credit_note_amount: float = 0
     payment_status: str
     delivery_status: str
     payment_note: Optional[str] = None

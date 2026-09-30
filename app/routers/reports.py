@@ -634,6 +634,26 @@ def get_report(
     # "Filtered Revenue" summary card (which reads this field) can never
     # disagree with the table footer (which sums rows.price on the frontend):
     # they are, byte-for-byte, sums of the same numbers.
+    # Pre-fetch active CN totals per sale_id so each invoice row shows its
+    # net amount (invoice amount minus credit notes issued against it).
+    sale_ids = [s.id for s in sales]
+    cn_by_sale: dict = {}
+    if sale_ids:
+        from sqlalchemy import func as _func
+        cn_rows_q = (
+            db.query(CreditNote.sale_id, _func.sum(CreditNote.total_amount))
+            .filter(
+                CreditNote.sale_id.in_(sale_ids),
+                CreditNote.sale_type == "PO",
+                CreditNote.is_deleted == False,
+                CreditNote.status != "Cancelled",
+            )
+            .group_by(CreditNote.sale_id)
+            .all()
+        )
+        for sale_id, cn_total in cn_rows_q:
+            cn_by_sale[sale_id] = float(cn_total or 0)
+
     rows = []
     total_revenue = 0
     for s in sales:
@@ -650,7 +670,11 @@ def get_report(
         # same formula used everywhere else Grand Total is shown, so the
         # Sales Report can never disagree with the Sales page over GST.
         taxable_amount, gst_amount = compute_sale_taxable_and_gst(s.items)
-        row_price = compute_sale_grand_total(taxable_amount, gst_amount, float(s.freight or 0))
+        gross_price = compute_sale_grand_total(taxable_amount, gst_amount, float(s.freight or 0))
+
+        # Net price = invoice amount minus any active credit notes against it
+        cn_amount = cn_by_sale.get(s.id, 0.0)
+        row_price = max(0.0, gross_price - cn_amount)
         total_revenue += row_price
 
         rows.append(ReportRow(
@@ -665,6 +689,7 @@ def get_report(
             price=row_price,
             subtotal=taxable_amount,
             gst_amount=gst_amount,
+            credit_note_amount=cn_amount,
             payment_status=s.payment_status.value if hasattr(s.payment_status, 'value') else str(s.payment_status),
             delivery_status="Dispatched",
             payment_note=s.payment_note,
@@ -674,11 +699,14 @@ def get_report(
             uom=po.uom if po else "Nos",
         ))
 
-    # Keep original sales as rows, but include live signed credit-note
-    # adjustments in the revenue summary (including manual old invoices).
+    # total_revenue is now accumulated per-row (net of CN) — no separate
+    # CN subtraction needed; the per-row deduction above covers all linked CNs.
+    # Manual/unlinked CNs (no sale_id) are still subtracted below so the
+    # summary total remains accurate for CNs entered against old invoices.
     cn_q = db.query(CreditNote).filter(
         CreditNote.sale_type == "PO", CreditNote.is_deleted == False,
         CreditNote.status != "Cancelled",
+        CreditNote.sale_id.is_(None),  # only manual/unlinked CNs
     )
     if from_date:
         cn_q = cn_q.filter(CreditNote.cn_date >= from_date.date())
@@ -686,7 +714,7 @@ def get_report(
         cn_q = cn_q.filter(CreditNote.cn_date <= to_date.date())
     if client and client.lower() != "all":
         cn_q = cn_q.filter(CreditNote.client_name.ilike(f"%{client}%"))
-    total_revenue += sum(float(cn.total_amount or 0) for cn in cn_q.all())
+    total_revenue -= sum(float(cn.total_amount or 0) for cn in cn_q.all())
 
     record_count = len(sales)
     avg_order_value = total_revenue / record_count if record_count else 0
@@ -808,6 +836,24 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
             delivered_payment += compute_sale_grand_total(s_taxable, s_gst, float(s.freight or 0))
             
         invoice_str = ", ".join(sorted(invoice_numbers)) if invoice_numbers else "—"
+
+        # Subtract active Credit Note amounts so delivered_payment reflects
+        # the net amount after credit notes issued against this PO's sales.
+        po_sale_ids = [s.id for s in o.sales if not getattr(s, 'is_deleted', False)]
+        if po_sale_ids:
+            from sqlalchemy import func as _func
+            cn_total = (
+                db.query(_func.sum(CreditNote.total_amount))
+                .filter(
+                    CreditNote.sale_id.in_(po_sale_ids),
+                    CreditNote.sale_type == "PO",
+                    CreditNote.is_deleted == False,
+                    CreditNote.status != "Cancelled",
+                )
+                .scalar() or 0
+            )
+            delivered_payment = max(0.0, delivered_payment - float(cn_total))
+            delivered_sub = max(0.0, delivered_sub - float(cn_total))
 
         p_sub = max(0, t_sub - delivered_sub)
         p_gst = max(0, t_gst - delivered_gst_amt)

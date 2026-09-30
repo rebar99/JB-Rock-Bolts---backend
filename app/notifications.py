@@ -34,18 +34,20 @@ def init_loop(loop: asyncio.AbstractEventLoop) -> None:
 
 
 def add_client(q: asyncio.Queue, user_id: Optional[int] = None,
-               user_name: str = "", user_email: str = "") -> None:
+               user_name: str = "", user_email: str = "",
+               workspace: str = "") -> None:
     _clients.add(q)
     if user_id:
         _user_conn_count[user_id] = _user_conn_count.get(user_id, 0) + 1
-        if user_id not in _online_users:
-            _online_users[user_id] = {
-                "user_id": user_id,
-                "user_name": user_name,
-                "user_email": user_email,
-                "connected_at": datetime.now(timezone.utc).isoformat(),
-                "is_active": True,
-            }
+        prev_connected = _online_users.get(user_id, {}).get("connected_at")
+        _online_users[user_id] = {
+            "user_id": user_id,
+            "user_name": user_name,
+            "user_email": user_email,
+            "workspace": workspace or _online_users.get(user_id, {}).get("workspace", "Marketing"),
+            "connected_at": prev_connected or datetime.now(timezone.utc).isoformat(),
+            "is_active": True,
+        }
 
 
 def remove_client(q: asyncio.Queue, user_id: Optional[int] = None) -> None:

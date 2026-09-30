@@ -144,11 +144,34 @@ def get_work_order_sales_report(
 
     sales = q.order_by(WorkOrderSale.created_at.desc()).limit(limit).all()
 
+    # Pre-fetch active CN totals per wo_sale_id so each invoice row shows net amount
+    sale_ids = [s.id for s in sales]
+    cn_by_sale: dict = {}
+    if sale_ids:
+        from sqlalchemy import func as _func
+        cn_rows_q = (
+            db.query(CreditNote.wo_sale_id, _func.sum(CreditNote.total_amount))
+            .filter(
+                CreditNote.wo_sale_id.in_(sale_ids),
+                CreditNote.sale_type == "WO",
+                CreditNote.is_deleted == False,
+                CreditNote.status != "Cancelled",
+            )
+            .group_by(CreditNote.wo_sale_id)
+            .all()
+        )
+        for wo_sale_id, cn_total in cn_rows_q:
+            cn_by_sale[wo_sale_id] = float(cn_total or 0)
+
     rows = []
     total_revenue = 0
     for s in sales:
         taxable_amount, gst_amount = compute_sale_taxable_and_gst(s.items)
-        row_price = compute_sale_grand_total(taxable_amount, gst_amount, float(s.freight or 0))
+        gross_price = compute_sale_grand_total(taxable_amount, gst_amount, float(s.freight or 0))
+
+        # Net price = invoice amount minus any active credit notes against it
+        cn_amount = cn_by_sale.get(s.id, 0.0)
+        row_price = max(0.0, gross_price - cn_amount)
         total_revenue += row_price
 
         rows.append(WorkOrderSaleReportRow(
@@ -160,12 +183,15 @@ def get_work_order_sales_report(
             subtotal=round(taxable_amount, 2),
             gst_amount=round(gst_amount, 2),
             grand_total=round(row_price, 2),
+            credit_note_amount=round(cn_amount, 2),
             payment_status=s.payment_status.value if hasattr(s.payment_status, 'value') else str(s.payment_status),
         ))
 
+    # Only subtract manual/unlinked CNs (no wo_sale_id) from the summary total
     cn_q = db.query(CreditNote).filter(
         CreditNote.sale_type == "WO", CreditNote.is_deleted == False,
         CreditNote.status != "Cancelled",
+        CreditNote.wo_sale_id.is_(None),
     )
     if from_date:
         cn_q = cn_q.filter(CreditNote.cn_date >= from_date.date())
@@ -173,7 +199,7 @@ def get_work_order_sales_report(
         cn_q = cn_q.filter(CreditNote.cn_date <= to_date.date())
     if client and client.lower() != "all":
         cn_q = cn_q.filter(CreditNote.client_name.ilike(f"%{client}%"))
-    total_revenue += sum(float(cn.total_amount or 0) for cn in cn_q.all())
+    total_revenue -= sum(float(cn.total_amount or 0) for cn in cn_q.all())
 
     record_count = len(sales)
     avg_order_value = total_revenue / record_count if record_count else 0

@@ -32,6 +32,8 @@ from app.routers import company_addresses
 from app.routers import system
 from app.routers import recently_deleted
 from app.routers import credit_notes
+from app.routers import application_access
+from app.routers import store_purchase
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -242,6 +244,11 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+            try:
+                conn.execute(text("SELECT is_super_admin FROM users LIMIT 1"))
+            except Exception:
+                conn.execute(text("ALTER TABLE users ADD COLUMN is_super_admin BOOLEAN NOT NULL DEFAULT FALSE"))
+
             # Safely create user_sessions table
             try:
                 conn.execute(text("SELECT id FROM user_sessions LIMIT 1"))
@@ -292,6 +299,16 @@ async def lifespan(app: FastAPI):
                         conn.execute(text(f"ALTER TABLE credit_notes ADD COLUMN {col} {dtype}"))
                     except Exception:
                         pass
+
+            # Groups Name is intentionally repeatable. Only the pair of
+            # Groups Name + Items Name identifies an inventory row.
+            try:
+                indexes = conn.execute(text("SHOW INDEX FROM store_purchase_items")).mappings().all()
+                if any(index["Key_name"] == "ix_store_purchase_items_name" and not index["Non_unique"] for index in indexes):
+                    conn.execute(text("ALTER TABLE store_purchase_items DROP INDEX ix_store_purchase_items_name"))
+                    conn.execute(text("CREATE INDEX ix_store_purchase_items_name ON store_purchase_items (name)"))
+            except Exception:
+                pass
 
             # ── Credit Notes tables (created by Base.metadata.create_all above,
             #    but safe-create here for clarity and idempotency) ──────────────
@@ -355,12 +372,146 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     pass
 
+            # Store Purchase material ledger fields. Existing item masters and
+            # balances are intentionally retained; the new columns merely add
+            # receipt, valuation and issue-history capability.
+            for col, dtype in [
+                ("vendor_name", "VARCHAR(200) NULL"), ("reference_no", "VARCHAR(100) NULL"),
+                ("receipt_date", "DATE NULL"), ("stock_item", "VARCHAR(150) NULL"),
+                ("uom", "VARCHAR(50) NOT NULL DEFAULT 'Nos'"), ("location", "VARCHAR(150) NULL"),
+                ("required_for", "VARCHAR(200) NULL"), ("rate", "FLOAT NOT NULL DEFAULT 0"),
+                ("previous_quantity", "FLOAT NOT NULL DEFAULT 0"),
+                ("current_month_quantity", "FLOAT NOT NULL DEFAULT 0"),
+                ("total_received_quantity", "FLOAT NOT NULL DEFAULT 0"),
+                ("issued_quantity", "FLOAT NOT NULL DEFAULT 0"), ("status", "VARCHAR(30) NOT NULL DEFAULT 'In Stock'"),
+            ]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM store_purchase_items LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE store_purchase_items ADD COLUMN {col} {dtype}"))
+                    except Exception:
+                        pass
+
+            try:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS store_purchase_stock_transactions (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        item_id INT NOT NULL, transaction_type VARCHAR(20) NOT NULL,
+                        quantity FLOAT NOT NULL, rate FLOAT NOT NULL DEFAULT 0, amount FLOAT NOT NULL DEFAULT 0,
+                        transaction_date DATE NOT NULL, vendor_name VARCHAR(200) NULL, reference_no VARCHAR(100) NULL,
+                        required_for VARCHAR(200) NULL, issued_to VARCHAR(200) NULL, location VARCHAR(150) NULL,
+                        remarks TEXT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, created_by VARCHAR(100) NULL,
+                        INDEX ix_store_purchase_stock_transactions_item_id (item_id),
+                        FOREIGN KEY (item_id) REFERENCES store_purchase_items(id)
+                    )
+                """))
+            except Exception:
+                pass
+
+            try:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS store_purchase_stock_transfers (
+                        id INT AUTO_INCREMENT PRIMARY KEY, item_id INT NOT NULL, quantity FLOAT NOT NULL,
+                        from_location VARCHAR(150) NOT NULL, to_location VARCHAR(150) NOT NULL,
+                        transfer_date DATE NOT NULL, required_for VARCHAR(200) NULL, remarks TEXT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP, created_by VARCHAR(100) NULL,
+                        INDEX ix_store_purchase_stock_transfers_item_id (item_id),
+                        FOREIGN KEY (item_id) REFERENCES store_purchase_items(id)
+                    )
+                """))
+            except Exception:
+                pass
+
+            try:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS store_purchase_stock_items (
+                        id INT AUTO_INCREMENT PRIMARY KEY, material_id INT NOT NULL,
+                        name VARCHAR(150) NOT NULL, uom VARCHAR(50) NOT NULL DEFAULT 'Nos',
+                        location VARCHAR(150) NULL, vendor_name VARCHAR(200) NULL, rate FLOAT NOT NULL DEFAULT 0,
+                        total_received_quantity FLOAT NOT NULL DEFAULT 0, issued_quantity FLOAT NOT NULL DEFAULT 0,
+                        available_quantity FLOAT NOT NULL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        UNIQUE KEY uq_store_material_stock_item (material_id, name),
+                        INDEX ix_store_purchase_stock_items_material_id (material_id),
+                        FOREIGN KEY (material_id) REFERENCES store_purchase_items(id)
+                    )
+                """))
+            except Exception:
+                pass
+
+            # Preserve existing Material Received records while adding the
+            # separately recorded freight charge used in receipt totals.
+            try:
+                conn.execute(text("SELECT freight_charge FROM store_purchase_material_receipts LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("ALTER TABLE store_purchase_material_receipts ADD COLUMN freight_charge FLOAT NOT NULL DEFAULT 0"))
+                except Exception:
+                    pass
+
+            try:
+                conn.execute(text("SELECT po_type FROM store_purchase_orders LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("ALTER TABLE store_purchase_orders ADD COLUMN po_type VARCHAR(30) NOT NULL DEFAULT 'Regular Vendor PO'"))
+                except Exception:
+                    pass
+
+            try:
+                conn.execute(text("SELECT receipt_line_id FROM store_purchase_stock_transactions LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("ALTER TABLE store_purchase_stock_transactions ADD COLUMN receipt_line_id INT NULL UNIQUE"))
+                except Exception:
+                    pass
+
+            # Add updated_at / updated_by tracking to material receipts
+            for col, dtype in [("updated_at", "DATETIME NULL"), ("updated_by", "VARCHAR(100) NULL")]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM store_purchase_material_receipts LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE store_purchase_material_receipts ADD COLUMN {col} {dtype}"))
+                    except Exception:
+                        pass
+
+            # Add payment tracking columns to material receipts
+            for col, dtype in [
+                ("payment_status", "VARCHAR(30) NOT NULL DEFAULT 'Unpaid'"),
+                ("amount_paid",    "FLOAT NULL DEFAULT 0"),
+                ("payment_date",   "DATE NULL"),
+                ("payment_reference", "VARCHAR(200) NULL"),
+            ]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM store_purchase_material_receipts LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE store_purchase_material_receipts ADD COLUMN {col} {dtype}"))
+                    except Exception:
+                        pass
+
     except Exception as e:
         logger.error(f"Error applying schema updates: {e}")
 
 
     db = SessionLocal()
     try:
+        from app.models.models import Application, ApplicationAccess, User
+        from app.config import settings
+        for name, code in [("Marketing", "marketing"), ("Store Purchase", "store_purchase")]:
+            if not db.query(Application).filter_by(code=code).first():
+                db.add(Application(name=name, code=code))
+        db.commit()
+        marketing = db.query(Application).filter_by(code="marketing").one()
+        legacy_admins = [email.strip().lower() for email in settings.ADMIN_EMAIL.split(",") if email.strip()]
+        super_admins = [email.strip().lower() for email in settings.SUPER_ADMIN_EMAIL.split(",") if email.strip()]
+        for user in db.query(User).all():
+            if user.email.lower() in legacy_admins and not db.query(ApplicationAccess).filter_by(user_id=user.id, application_id=marketing.id).first():
+                db.add(ApplicationAccess(user_id=user.id, application_id=marketing.id, role="admin"))
+            if user.email.lower() in super_admins:
+                user.is_super_admin = True
+        db.commit()
         from app.services.seed import run_seed
         run_seed(db)
         # On every server start, mark all previously "active" sessions as logged out.
@@ -506,9 +657,50 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def enforce_marketing_application_access(request, call_next):
+    """Backend enforcement for the existing Marketing API.
+
+    The Store Purchase router performs its own store_purchase checks.  Keeping
+    this boundary here means a button hidden in React can never become the
+    security control for the legacy Marketing endpoints.
+    """
+    path = request.url.path
+    public_or_non_marketing = (
+        not path.startswith("/api/")
+        or path.startswith("/api/users/")
+        or path == "/api/users"
+        or path.startswith("/api/application-access")
+        or path.startswith("/api/store-purchase")
+        or request.method == "OPTIONS"
+    )
+    if public_or_non_marketing:
+        return await call_next(request)
+
+    from app.utils.auth import get_user_id_from_token, _decode_raw_token, require_application_access
+    from app.models.models import User
+    from fastapi.responses import JSONResponse
+    authorization = request.headers.get("Authorization", "")
+    user_id = get_user_id_from_token(authorization) or _decode_raw_token(request.query_params.get("token", ""))
+    if not user_id:
+        return JSONResponse(status_code=401, content={"detail": "Invalid or expired token."})
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if not user or not user.is_active:
+            return JSONResponse(status_code=401, content={"detail": "User not found or inactive."})
+        try:
+            require_application_access(user, db, "marketing")
+        except Exception as exc:
+            return JSONResponse(status_code=403, content={"detail": getattr(exc, "detail", "No Marketing access.")})
+    finally:
+        db.close()
+    return await call_next(request)
 
 # Ensure uploads directory exists
 UPLOAD_DIR = "uploads"
@@ -538,6 +730,8 @@ app.include_router(company_addresses.router)
 app.include_router(system.router)
 app.include_router(recently_deleted.router)
 app.include_router(credit_notes.router)
+app.include_router(application_access.router)
+app.include_router(store_purchase.router)
 
 
 @app.get("/", tags=["Health"])

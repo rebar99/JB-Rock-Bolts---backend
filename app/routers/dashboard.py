@@ -214,7 +214,7 @@ def get_stats(gst: int = 1, db: Session = Depends(get_db)):
         float(cn.total_amount if gst == 1 else cn.taxable_amount) or 0
         for cn in credit_notes
     )
-    total_revenue = round(po_revenue + wo_revenue + credit_note_adjustment, 2)
+    total_revenue = round(po_revenue + wo_revenue - credit_note_adjustment, 2)
 
 
     # Total invoices and clients are combined across Supply (PO) and Job Work (WO).

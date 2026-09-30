@@ -1,12 +1,12 @@
-﻿from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
 from datetime import datetime, timedelta
 
 from app.database import get_db
-from app.models.models import CreditNote, CreditNoteItem, Sale, WorkOrderSale, SaleItem, WorkOrderSaleItem
+from app.models.models import CreditNote, CreditNoteItem, Sale, WorkOrderSale, SaleItem, WorkOrderSaleItem, POLineItem, WOLineItem, PurchaseOrder, WorkOrder
 from app.schemas.credit_note import CreditNoteCreate, CreditNoteUpdate, CreditNoteOut, AlreadyCreditedItem
-from app.utils.helpers import generate_credit_note_number, log_activity
+from app.utils.helpers import generate_credit_note_number, log_activity, recalc_po_delivered_quantities, recalc_wo_completed_quantities
 from app.utils.auth import require_admin_for_write
 from app.models.models import User
 
@@ -158,20 +158,15 @@ def create_credit_note(
 
     taxable_amount = gst_amount = total_amount = 0.0
     for it in payload.items:
-        # Quantity Less is always a reduction and Quantity Excess is always
-        # an increase. For all other corrections a typed +/- quantity is
-        # retained, allowing explicit amount increase/decrease adjustments.
-        quantity = float(it.credit_qty or 0)
-        if payload.reason == "Quantity Less":
-            quantity = -abs(quantity)
-        elif payload.reason == "Quantity Excess":
-            quantity = abs(quantity)
+        # All quantities in Credit Notes are treated as positive returns/adjustments
+        quantity = abs(float(it.credit_qty or 0))
         subtotal = quantity * float(it.unit_price or 0)
         item_gst = subtotal * float(it.gst_rate or 0) / 100
         item_total = subtotal + item_gst
         taxable_amount += subtotal
         gst_amount += item_gst
         total_amount += item_total
+
         db.add(CreditNoteItem(
             credit_note_id=cn.id,
             item=it.item,
@@ -190,6 +185,50 @@ def create_credit_note(
 
     db.commit()
     db.refresh(cn)
+
+    # ── Increase PO/WO ordered quantity for each credited item ────────────
+    # When a credit note is issued (items returned), those units need to be
+    # re-delivered — so the PO/WO line item's ordered quantity is increased
+    # by the credited quantity, keeping those units as "pending".
+    if source_sale and payload.sale_type.upper() == "PO" and payload.sale_id:
+        po = db.query(PurchaseOrder).filter(PurchaseOrder.id == source_sale.po_id).first()
+        if po:
+            item_map = {li.item.strip().lower(): li for li in po.line_items}
+            for it in cn.items:
+                credit_qty = abs(float(it.credit_qty or 0))
+                li = item_map.get((it.item or "").strip().lower())
+                if li:
+                    li.quantity = round(li.quantity + credit_qty, 10)
+            po.total_quantity = sum(li.quantity for li in po.line_items)
+            db.commit()
+
+    elif source_sale and payload.sale_type.upper() == "WO" and payload.wo_sale_id:
+        wo = db.query(WorkOrder).filter(WorkOrder.id == source_sale.wo_id).first()
+        if wo:
+            item_map = {li.item.strip().lower(): li for li in wo.line_items}
+            for it in cn.items:
+                credit_qty = abs(float(it.credit_qty or 0))
+                li = item_map.get((it.item or "").strip().lower())
+                if li:
+                    li.quantity = round(li.quantity + credit_qty, 10)
+            db.commit()
+
+    # ── Recalculate delivered/completed quantities from scratch ───────────
+    # This is the authoritative recalc path — it sums SaleItem quantities
+    # and subtracts all active Credit Note quantities, so the PO/WO line
+    # items always reflect the correct net delivered amount.
+    if source_sale:
+        if payload.sale_type.upper() == "PO" and payload.sale_id:
+            po = db.query(PurchaseOrder).filter(PurchaseOrder.id == source_sale.po_id).first()
+            if po:
+                recalc_po_delivered_quantities(db, po)
+                db.commit()
+        elif payload.sale_type.upper() == "WO" and payload.wo_sale_id:
+            wo = db.query(WorkOrder).filter(WorkOrder.id == source_sale.wo_id).first()
+            if wo:
+                recalc_wo_completed_quantities(db, wo)
+                db.commit()
+
     log_activity(
         db,
         action="Credit Note Created",
@@ -200,6 +239,7 @@ def create_credit_note(
         user=payload.created_by,
     )
     return _load_cn(cn.id, db)
+
 
 
 # ── Update (Admin) ────────────────────────────────────────────────────────────
@@ -232,21 +272,48 @@ def update_credit_note(
             setattr(cn, field, value)
 
     if payload.items is not None:
+        old_items = db.query(CreditNoteItem).filter(CreditNoteItem.credit_note_id == cn_id).all()
+        source_sale = None
+        if cn.sale_type == "PO" and cn.sale_id:
+            source_sale = db.query(Sale).filter(Sale.id == cn.sale_id).first()
+        elif cn.sale_type == "WO" and cn.wo_sale_id:
+            source_sale = db.query(WorkOrderSale).filter(WorkOrderSale.id == cn.wo_sale_id).first()
+
+        # ── Revert old credited qty from PO/WO ordered quantity ──────────
+        if source_sale and cn.sale_type == "PO":
+            po = db.query(PurchaseOrder).filter(PurchaseOrder.id == source_sale.po_id).first()
+            if po:
+                item_map = {li.item.strip().lower(): li for li in po.line_items}
+                for old_it in old_items:
+                    old_qty = abs(float(old_it.credit_qty or 0))
+                    li = item_map.get((old_it.item or "").strip().lower())
+                    if li:
+                        li.quantity = round(max(0, li.quantity - old_qty), 10)
+                po.total_quantity = sum(li.quantity for li in po.line_items)
+                db.commit()
+        elif source_sale and cn.sale_type == "WO":
+            wo = db.query(WorkOrder).filter(WorkOrder.id == source_sale.wo_id).first()
+            if wo:
+                item_map = {li.item.strip().lower(): li for li in wo.line_items}
+                for old_it in old_items:
+                    old_qty = abs(float(old_it.credit_qty or 0))
+                    li = item_map.get((old_it.item or "").strip().lower())
+                    if li:
+                        li.quantity = round(max(0, li.quantity - old_qty), 10)
+                db.commit()
+
         # Replace all items
         db.query(CreditNoteItem).filter(CreditNoteItem.credit_note_id == cn_id).delete()
         taxable_amount = gst_amount = total_amount = 0.0
         for it in payload.items:
-            quantity = float(it.credit_qty or 0)
-            if cn.reason == "Quantity Less":
-                quantity = -abs(quantity)
-            elif cn.reason == "Quantity Excess":
-                quantity = abs(quantity)
+            quantity = abs(float(it.credit_qty or 0))
             subtotal = quantity * float(it.unit_price or 0)
             item_gst = subtotal * float(it.gst_rate or 0) / 100
             item_total = subtotal + item_gst
             taxable_amount += subtotal
             gst_amount += item_gst
             total_amount += item_total
+
             db.add(CreditNoteItem(
                 credit_note_id=cn_id,
                 item=it.item,
@@ -264,7 +331,46 @@ def update_credit_note(
         cn.total_amount = total_amount
 
     db.commit()
+
+    # ── Apply new credited qty to PO/WO ordered quantity + recalc ────────
+    if payload.items is not None:
+        source_sale = None
+        if cn.sale_type == "PO" and cn.sale_id:
+            source_sale = db.query(Sale).filter(Sale.id == cn.sale_id).first()
+        elif cn.sale_type == "WO" and cn.wo_sale_id:
+            source_sale = db.query(WorkOrderSale).filter(WorkOrderSale.id == cn.wo_sale_id).first()
+
+        if source_sale and cn.sale_type == "PO":
+            po = db.query(PurchaseOrder).filter(PurchaseOrder.id == source_sale.po_id).first()
+            if po:
+                new_items = db.query(CreditNoteItem).filter(CreditNoteItem.credit_note_id == cn_id).all()
+                item_map = {li.item.strip().lower(): li for li in po.line_items}
+                for new_it in new_items:
+                    credit_qty = abs(float(new_it.credit_qty or 0))
+                    li = item_map.get((new_it.item or "").strip().lower())
+                    if li:
+                        li.quantity = round(li.quantity + credit_qty, 10)
+                po.total_quantity = sum(li.quantity for li in po.line_items)
+                db.commit()
+                recalc_po_delivered_quantities(db, po)
+                db.commit()
+        elif source_sale and cn.sale_type == "WO":
+            wo = db.query(WorkOrder).filter(WorkOrder.id == source_sale.wo_id).first()
+            if wo:
+                new_items = db.query(CreditNoteItem).filter(CreditNoteItem.credit_note_id == cn_id).all()
+                item_map = {li.item.strip().lower(): li for li in wo.line_items}
+                for new_it in new_items:
+                    credit_qty = abs(float(new_it.credit_qty or 0))
+                    li = item_map.get((new_it.item or "").strip().lower())
+                    if li:
+                        li.quantity = round(li.quantity + credit_qty, 10)
+                db.commit()
+                recalc_wo_completed_quantities(db, wo)
+                db.commit()
+
     return _load_cn(cn_id, db)
+
+
 
 
 # ── Cancel / Soft-delete (Admin) ─────────────────────────────────────────────
@@ -276,10 +382,51 @@ def cancel_credit_note(
     current_user: User = Depends(require_admin_for_write),
 ):
     cn = _load_cn(cn_id, db)
+
+    source_sale = None
+    if cn.sale_type == "PO" and cn.sale_id:
+        source_sale = db.query(Sale).filter(Sale.id == cn.sale_id).first()
+    elif cn.sale_type == "WO" and cn.wo_sale_id:
+        source_sale = db.query(WorkOrderSale).filter(WorkOrderSale.id == cn.wo_sale_id).first()
+
+    was_active = cn.status != "Cancelled"
+
     cn.is_deleted = True
     cn.deleted_at = datetime.utcnow()
     cn.deleted_by = current_user.username if hasattr(current_user, "username") else str(current_user.id)
     cn.permanent_delete_at = cn.deleted_at + timedelta(hours=24)
     cn.status = "Cancelled"
     db.commit()
+
+    # ── Revert PO/WO ordered quantity (CN is being cancelled) ────────────
+    # When a credit note is cancelled, the return is undone — those units are
+    # no longer coming back, so the PO/WO ordered quantity is reduced back.
+    if source_sale and was_active:
+        if cn.sale_type == "PO":
+            po = db.query(PurchaseOrder).filter(PurchaseOrder.id == source_sale.po_id).first()
+            if po:
+                item_map = {li.item.strip().lower(): li for li in po.line_items}
+                for cn_it in cn.items:
+                    credit_qty = abs(float(cn_it.credit_qty or 0))
+                    li = item_map.get((cn_it.item or "").strip().lower())
+                    if li:
+                        li.quantity = round(max(0, li.quantity - credit_qty), 10)
+                po.total_quantity = sum(li.quantity for li in po.line_items)
+                db.commit()
+                recalc_po_delivered_quantities(db, po)
+                db.commit()
+        elif cn.sale_type == "WO":
+            wo = db.query(WorkOrder).filter(WorkOrder.id == source_sale.wo_id).first()
+            if wo:
+                item_map = {li.item.strip().lower(): li for li in wo.line_items}
+                for cn_it in cn.items:
+                    credit_qty = abs(float(cn_it.credit_qty or 0))
+                    li = item_map.get((cn_it.item or "").strip().lower())
+                    if li:
+                        li.quantity = round(max(0, li.quantity - credit_qty), 10)
+                db.commit()
+                recalc_wo_completed_quantities(db, wo)
+                db.commit()
+
     return {"detail": f"Credit Note {cn.cn_number} moved to Recently Deleted"}
+

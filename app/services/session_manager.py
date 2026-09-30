@@ -10,6 +10,9 @@ class ConnectionManager:
         self.pending_login_events: Dict[str, asyncio.Event] = {}
         # request_id -> result (True/False)
         self.pending_login_results: Dict[str, bool] = {}
+        # request_id -> account owner. Prevents another authenticated account
+        # from approving or rejecting a login prompt it does not own.
+        self.pending_login_users: Dict[str, int] = {}
 
     async def connect(self, websocket: WebSocket, user_id: int):
         await websocket.accept()

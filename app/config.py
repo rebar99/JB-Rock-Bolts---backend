@@ -36,7 +36,9 @@ class Settings(BaseSettings):
     APP_NAME: str = "JB Rock Bolts API"
     APP_VERSION: str = "1.0.0"
     APP_ENV: str = "development"
-    DEBUG: bool = True
+    # SQL echoing adds substantial I/O to every multi-line PO save. Enable it
+    # explicitly only while diagnosing a local development issue.
+    DEBUG: bool = False
     PORT: int = 8000
 
     # Railway's MySQL plugin injects a ready-to-use connection string via
@@ -103,7 +105,20 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "change-this-secret-key"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 
-    ADMIN_EMAIL: str = "admin@jbrockbolts.com"
+    ADMIN_EMAIL: str = "deepikarajput412003@gmail.com"
+    # Bootstrap only.  After first start, Super Admin assignments are managed
+    # from the portal and stored in users.is_super_admin.
+    SUPER_ADMIN_EMAIL: str = "deepikar412003@gmail.com"
+
+    # Password-reset mail sender. Configure these in .env / production secrets;
+    # never hard-code an email password in source control.
+    SMTP_HOST: Optional[str] = None
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: Optional[str] = None
+    SMTP_PASSWORD: Optional[str] = None
+    SMTP_FROM_EMAIL: Optional[str] = None
+    SMTP_USE_TLS: bool = True
+    PASSWORD_RESET_OTP_EXPIRE_MINUTES: int = 10
 
     DEFAULT_PAGE_SIZE: int = 50
     MAX_PAGE_SIZE: int = 200

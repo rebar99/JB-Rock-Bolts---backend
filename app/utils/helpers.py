@@ -298,16 +298,36 @@ def compute_sale_grand_total(taxable_amount: float, gst_amount: float, freight: 
 
 
 def recalc_po_delivered_quantities(db: Session, po) -> None:
-    """Rebuild PurchaseOrder/POLineItem delivered_quantity from actual SaleItem rows.
+    """Rebuild PurchaseOrder/POLineItem delivered_quantity from actual SaleItem rows,
+    minus any active Credit Note quantities.
 
     This always recomputes from scratch (fresh SUM over SaleItem, the source of
     truth for real dispatches) instead of accumulating with +=/-=, so the stored
     value can never drift upward from duplicate/retried calls — it is simply
     overwritten with whatever the Sales table actually contains.
     Soft-deleted Sales (is_deleted=True) are excluded from the calculation.
+    Active (non-deleted, non-cancelled) Credit Notes are subtracted.
     """
     from sqlalchemy import func
-    from app.models.models import Sale, SaleItem
+    from app.models.models import Sale, SaleItem, CreditNote, CreditNoteItem
+
+    # ── Helper: total credited qty for a given PO line item ──────────────
+    def _credited_qty_for_line(line_item_id: int) -> float:
+        """Sum credit_qty from active credit notes linked to this PO line item."""
+        total = (
+            db.query(func.sum(CreditNoteItem.credit_qty))
+            .join(CreditNote, CreditNoteItem.credit_note_id == CreditNote.id)
+            .join(Sale, CreditNote.sale_id == Sale.id)
+            .join(SaleItem, (SaleItem.sale_id == Sale.id) & (SaleItem.line_item_id == line_item_id))
+            .filter(
+                CreditNote.sale_type == "PO",
+                CreditNote.is_deleted == False,
+                CreditNote.status != "Cancelled",
+                CreditNoteItem.item == SaleItem.item,
+            )
+            .scalar() or 0
+        )
+        return abs(float(total))
 
     if not po.line_items:
         total = (
@@ -316,11 +336,43 @@ def recalc_po_delivered_quantities(db: Session, po) -> None:
             .filter(Sale.po_id == po.id, Sale.is_deleted == False)
             .scalar() or 0
         )
-        po.delivered_quantity = round(max(0, float(total)), 10)
+        # Subtract credit notes for this PO (no line items path)
+        cn_total = (
+            db.query(func.sum(CreditNoteItem.credit_qty))
+            .join(CreditNote, CreditNoteItem.credit_note_id == CreditNote.id)
+            .join(Sale, CreditNote.sale_id == Sale.id)
+            .filter(
+                Sale.po_id == po.id,
+                CreditNote.sale_type == "PO",
+                CreditNote.is_deleted == False,
+                CreditNote.status != "Cancelled",
+            )
+            .scalar() or 0
+        )
+        po.delivered_quantity = round(max(0, float(total) - abs(float(cn_total))), 10)
         return
 
     # Only count non-deleted sales
     po_sale_ids = [s.id for s in po.sales if not getattr(s, 'is_deleted', False)]
+
+    # Pre-compute credited qty per item name for this PO's credit notes
+    cn_by_item: dict[str, float] = {}
+    if po_sale_ids:
+        cn_rows = (
+            db.query(CreditNoteItem.item, func.sum(CreditNoteItem.credit_qty))
+            .join(CreditNote, CreditNoteItem.credit_note_id == CreditNote.id)
+            .filter(
+                CreditNote.sale_id.in_(po_sale_ids),
+                CreditNote.sale_type == "PO",
+                CreditNote.is_deleted == False,
+                CreditNote.status != "Cancelled",
+            )
+            .group_by(CreditNoteItem.item)
+            .all()
+        )
+        for item_name, qty in cn_rows:
+            cn_by_item[item_name] = abs(float(qty or 0))
+
     total_all = 0.0
     for li in po.line_items:
         by_id = (
@@ -336,29 +388,51 @@ def recalc_po_delivered_quantities(db: Session, po) -> None:
                 SaleItem.line_item_id.is_(None),
                 SaleItem.item.ilike(li.item),
             ).scalar() or 0
-        li.delivered_quantity = round(max(0, float(by_id) + float(by_name)), 10)
+        credited = cn_by_item.get(li.item, 0.0)
+        li.delivered_quantity = round(max(0, float(by_id) + float(by_name) - credited), 10)
         total_all += li.delivered_quantity
     po.delivered_quantity = round(max(0, total_all), 10)
 
 
 def recalc_wo_completed_quantities(db: Session, wo) -> None:
     """Rebuild WorkOrder/WOLineItem completed_quantity from actual
-    WorkOrderSaleItem rows. Mirrors recalc_po_delivered_quantities exactly —
+    WorkOrderSaleItem rows, minus any active Credit Note quantities.
+    Mirrors recalc_po_delivered_quantities exactly —
     always recomputes from scratch (fresh SUM over WorkOrderSaleItem, the
     source of truth for real dispatches) instead of accumulating with
     +=/-=, so the stored value can never drift upward from duplicate/retried
     calls — it is simply overwritten with whatever the Work Order Sales
     table actually contains.
     Soft-deleted WorkOrderSales (is_deleted=True) are excluded.
+    Active (non-deleted, non-cancelled) Credit Notes are subtracted.
     """
     from sqlalchemy import func
-    from app.models.models import WorkOrderSale, WorkOrderSaleItem
+    from app.models.models import WorkOrderSale, WorkOrderSaleItem, CreditNote, CreditNoteItem
 
     if not wo.line_items:
         return
 
     # Only count non-deleted WO sales
     wo_sale_ids = [s.id for s in wo.work_order_sales if not getattr(s, 'is_deleted', False)]
+
+    # Pre-compute credited qty per item name for this WO's credit notes
+    cn_by_item: dict[str, float] = {}
+    if wo_sale_ids:
+        cn_rows = (
+            db.query(CreditNoteItem.item, func.sum(CreditNoteItem.credit_qty))
+            .join(CreditNote, CreditNoteItem.credit_note_id == CreditNote.id)
+            .filter(
+                CreditNote.wo_sale_id.in_(wo_sale_ids),
+                CreditNote.sale_type == "WO",
+                CreditNote.is_deleted == False,
+                CreditNote.status != "Cancelled",
+            )
+            .group_by(CreditNoteItem.item)
+            .all()
+        )
+        for item_name, qty in cn_rows:
+            cn_by_item[item_name] = abs(float(qty or 0))
+
     total_all = 0.0
     for li in wo.line_items:
         by_id = (
@@ -374,7 +448,8 @@ def recalc_wo_completed_quantities(db: Session, wo) -> None:
                 WorkOrderSaleItem.line_item_id.is_(None),
                 WorkOrderSaleItem.item.ilike(li.item),
             ).scalar() or 0
-        li.completed_quantity = round(max(0, float(by_id) + float(by_name)), 10)
+        credited = cn_by_item.get(li.item, 0.0)
+        li.completed_quantity = round(max(0, float(by_id) + float(by_name) - credited), 10)
         total_all += li.completed_quantity
 
 

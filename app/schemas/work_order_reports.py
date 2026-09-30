@@ -37,6 +37,7 @@ class WorkOrderSaleReportRow(BaseModel):
     subtotal: float = 0
     gst_amount: float = 0
     grand_total: float = 0
+    credit_note_amount: float = 0
     payment_status: str
 
 

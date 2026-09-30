@@ -6,9 +6,10 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.models import SystemLog
+from app.models.models import SystemLog, User
 from app.schemas.log import SystemLogOut
 from app import notifications
+from app.utils.auth import get_current_user
 
 router = APIRouter(prefix="/api/logs", tags=["Logs"])
 
@@ -19,8 +20,8 @@ def list_logs(limit: int = 100, db: Session = Depends(get_db)):
 
 
 @router.get("/online-users")
-def get_online_users():
-    """Return users who currently have an active SSE connection (i.e. the app is open)."""
+def get_online_users(current_user: User = Depends(get_current_user)):
+    """Return users who currently have an active SSE connection."""
     return notifications.get_online_users()
 
 
@@ -30,14 +31,15 @@ async def stream_logs(
     user_id: Optional[int] = None,
     user_name: Optional[str] = None,
     user_email: Optional[str] = None,
+    workspace: Optional[str] = None,
 ):
     """SSE endpoint — pushes new SystemLog entries to the browser in real time.
 
-    Accepts optional user_id / user_name / user_email query params so the server
-    can track which users currently have the app open (online presence).
+    Accepts optional user_id / user_name / user_email / workspace query params so the server
+    can track which users currently have the app open and where they are logged in.
     """
     queue: asyncio.Queue = asyncio.Queue()
-    notifications.add_client(queue, user_id, user_name or "", user_email or "")
+    notifications.add_client(queue, user_id, user_name or "", user_email or "", workspace or "")
 
     async def event_gen():
         try:

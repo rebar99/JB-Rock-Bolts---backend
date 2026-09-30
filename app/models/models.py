@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, Float, Numeric, Text, DateTime, Date, Boolean,
-    ForeignKey, Enum, func,
+    ForeignKey, Enum, func, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -34,14 +34,298 @@ class User(Base):
     email = Column(String(150), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
     is_active = Column(Boolean, default=True)
+    # This is intentionally a system-wide capability only.  Application admin
+    # rights live in application_access and must never be inferred globally.
+    is_super_admin = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
-    @property
-    def is_admin(self) -> bool:
-        from app.config import settings
-        admin_emails = [e.strip().lower() for e in settings.ADMIN_EMAIL.split(",") if e.strip()]
-        return self.email.strip().lower() in admin_emails
+    application_access = relationship("ApplicationAccess", back_populates="user", cascade="all, delete-orphan")
+
+
+class Application(Base):
+    __tablename__ = "applications"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False, unique=True)
+    code = Column(String(50), nullable=False, unique=True, index=True)
+    access = relationship("ApplicationAccess", back_populates="application", cascade="all, delete-orphan")
+
+
+class ApplicationAccess(Base):
+    __tablename__ = "application_access"
+    __table_args__ = (UniqueConstraint("user_id", "application_id", name="uq_application_access_user_app"),)
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    application_id = Column(Integer, ForeignKey("applications.id"), nullable=False, index=True)
+    # no_access rows are retained so the administrator can manage a complete matrix
+    role = Column(String(20), nullable=False, default="none")  # none | user | admin
+
+    user = relationship("User", back_populates="application_access")
+    application = relationship("Application", back_populates="access")
+
+
+class StorePurchaseItem(Base):
+    """Inventory belongs to Store Purchase only; it is deliberately separate
+    from the legacy Marketing inventory table."""
+    __tablename__ = "store_purchase_items"
+    id = Column(Integer, primary_key=True)
+    # A group is not a unique material by itself: one group can contain many
+    # different item names (for example, Round Black / 42mm and / 63mm).
+    name = Column(String(300), nullable=False, index=True)
+    quantity = Column(Float, nullable=False, default=0)
+    reorder_level = Column(Float, nullable=False, default=0)
+    vendor_name = Column(String(200), nullable=True)
+    reference_no = Column(String(100), nullable=True)
+    receipt_date = Column(Date, nullable=True)
+    stock_item = Column(String(150), nullable=True)
+    uom = Column(String(50), nullable=False, default="Nos")
+    location = Column(String(150), nullable=True)
+    required_for = Column(String(200), nullable=True)
+    rate = Column(Float, nullable=False, default=0)
+    previous_quantity = Column(Float, nullable=False, default=0)
+    current_month_quantity = Column(Float, nullable=False, default=0)
+    total_received_quantity = Column(Float, nullable=False, default=0)
+    issued_quantity = Column(Float, nullable=False, default=0)
+    status = Column(String(30), nullable=False, default="In Stock")
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    transactions = relationship("StorePurchaseStockTransaction", back_populates="item", cascade="all, delete-orphan", order_by="StorePurchaseStockTransaction.transaction_date.desc()")
+    stock_items = relationship("StorePurchaseStockItem", back_populates="material", cascade="all, delete-orphan", order_by="StorePurchaseStockItem.name")
+
+
+class StorePurchaseStockItem(Base):
+    """Named stock variants belonging to one material master (one material
+    can therefore carry any number of stock items)."""
+    __tablename__ = "store_purchase_stock_items"
+    __table_args__ = (UniqueConstraint("material_id", "name", name="uq_store_material_stock_item"),)
+    id = Column(Integer, primary_key=True)
+    material_id = Column(Integer, ForeignKey("store_purchase_items.id"), nullable=False, index=True)
+    name = Column(String(150), nullable=False)
+    uom = Column(String(50), nullable=False, default="Nos")
+    location = Column(String(150), nullable=True)
+    vendor_name = Column(String(200), nullable=True)
+    rate = Column(Float, nullable=False, default=0)
+    total_received_quantity = Column(Float, nullable=False, default=0)
+    issued_quantity = Column(Float, nullable=False, default=0)
+    available_quantity = Column(Float, nullable=False, default=0)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    material = relationship("StorePurchaseItem", back_populates="stock_items")
+
+
+class StorePurchaseStockTransaction(Base):
+    """Immutable receipt/issue ledger: item quantity is the current balance."""
+    __tablename__ = "store_purchase_stock_transactions"
+    id = Column(Integer, primary_key=True)
+    item_id = Column(Integer, ForeignKey("store_purchase_items.id"), nullable=False, index=True)
+    transaction_type = Column(String(20), nullable=False)  # RECEIPT | ISSUE
+    quantity = Column(Float, nullable=False)
+    rate = Column(Float, nullable=False, default=0)
+    amount = Column(Float, nullable=False, default=0)
+    transaction_date = Column(Date, nullable=False)
+    vendor_name = Column(String(200), nullable=True)
+    reference_no = Column(String(100), nullable=True)
+    required_for = Column(String(200), nullable=True)
+    issued_to = Column(String(200), nullable=True)
+    location = Column(String(150), nullable=True)
+    remarks = Column(Text, nullable=True)
+    receipt_line_id = Column(Integer, ForeignKey("store_purchase_material_receipt_lines.id"), nullable=True, unique=True, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+    item = relationship("StorePurchaseItem", back_populates="transactions")
+
+
+class StorePurchaseStockTransfer(Base):
+    """Store-to-store movement. It does not alter total company stock."""
+    __tablename__ = "store_purchase_stock_transfers"
+    id = Column(Integer, primary_key=True)
+    item_id = Column(Integer, ForeignKey("store_purchase_items.id"), nullable=False, index=True)
+    quantity = Column(Float, nullable=False)
+    from_location = Column(String(150), nullable=False)
+    to_location = Column(String(150), nullable=False)
+    transfer_date = Column(Date, nullable=False)
+    required_for = Column(String(200), nullable=True)
+    remarks = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+    item = relationship("StorePurchaseItem")
+
+
+class StorePurchaseOrder(Base):
+    __tablename__ = "store_purchase_orders"
+    id = Column(Integer, primary_key=True)
+    order_number = Column(String(100), nullable=False, unique=True, index=True)
+    supplier = Column(String(200), nullable=False)
+    item_name = Column(String(300), nullable=False)
+    quantity = Column(Float, nullable=False, default=0)
+    unit_price = Column(Float, nullable=False, default=0)
+    status = Column(String(30), nullable=False, default="Pending Approval")
+    po_type = Column(String(30), nullable=False, default="Regular Vendor PO", server_default="Regular Vendor PO")
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+    details = relationship("StorePurchaseOrderDetail", back_populates="order", uselist=False, cascade="all, delete-orphan")
+    line_items = relationship("StorePurchaseOrderLine", back_populates="order", cascade="all, delete-orphan", order_by="StorePurchaseOrderLine.line_number")
+    material_receipts = relationship("StorePurchaseMaterialReceipt", back_populates="order", cascade="all, delete-orphan")
+    activities = relationship("StorePurchaseOrderActivity", back_populates="order", cascade="all, delete-orphan", order_by="StorePurchaseOrderActivity.created_at.desc()")
+    approvals = relationship("StorePurchaseOrderApproval", back_populates="order", cascade="all, delete-orphan", order_by="StorePurchaseOrderApproval.level_order, StorePurchaseOrderApproval.id")
+
+
+class POApprovalLevel(Base):
+    """Super-admin configured, amount-based Store PO approval rule."""
+    __tablename__ = "po_approval_levels"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    min_amount = Column(Float, nullable=False, default=0)
+    max_amount = Column(Float, nullable=True)  # NULL means no upper limit
+    approval_rule = Column(String(10), nullable=False, default="any")  # any | all
+    is_enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, server_default=func.now())
+    approvers = relationship("POApprovalLevelApprover", back_populates="level", cascade="all, delete-orphan")
+
+
+class POApprovalLevelApprover(Base):
+    __tablename__ = "po_approval_level_approvers"
+    __table_args__ = (UniqueConstraint("level_id", "user_id", name="uq_po_level_approver"),)
+    id = Column(Integer, primary_key=True)
+    level_id = Column(Integer, ForeignKey("po_approval_levels.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    level = relationship("POApprovalLevel", back_populates="approvers")
+    user = relationship("User")
+
+
+class POApproverPermission(Base):
+    """Separate from application access: this is the explicit approval authority."""
+    __tablename__ = "po_approver_permissions"
+    __table_args__ = (UniqueConstraint("user_id", name="uq_po_approver_permission"),)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    max_approval_amount = Column(Float, nullable=True)  # NULL means unlimited
+    is_enabled = Column(Boolean, nullable=False, default=True)
+    user = relationship("User")
+
+
+class StorePurchaseOrderApproval(Base):
+    """A snapshot of one assigned approver for a PO; never rewritten as settings change."""
+    __tablename__ = "store_purchase_order_approvals"
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("store_purchase_orders.id"), nullable=False, index=True)
+    level_id = Column(Integer, ForeignKey("po_approval_levels.id"), nullable=False)
+    level_name = Column(String(100), nullable=False)
+    level_order = Column(Integer, nullable=False, default=1)
+    approval_rule = Column(String(10), nullable=False, default="any")
+    approver_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    action = Column(String(20), nullable=False, default="Pending")
+    action_at = Column(DateTime, nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+    order = relationship("StorePurchaseOrder", back_populates="approvals")
+    approver = relationship("User")
+
+
+class StorePurchaseOrderActivity(Base):
+    """Immutable audit trail for Store Purchase Orders."""
+    __tablename__ = "store_purchase_order_activities"
+
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("store_purchase_orders.id"), nullable=False, index=True)
+    action = Column(String(50), nullable=False)
+    details = Column(String(500), nullable=True)
+    performed_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    order = relationship("StorePurchaseOrder", back_populates="activities")
+
+
+class StorePurchaseOrderDetail(Base):
+    """Vendor-facing PO header, totals and terms.  Kept Store-only so it
+    cannot overlap the existing Marketing purchase-order records."""
+    __tablename__ = "store_purchase_order_details"
+
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("store_purchase_orders.id"), nullable=False, unique=True, index=True)
+    vendor_code = Column(String(100), nullable=True)
+    vendor_address = Column(Text, nullable=True)
+    vendor_contact = Column(String(200), nullable=True)
+    vendor_gst = Column(String(50), nullable=True)
+    po_date = Column(Date, nullable=True)
+    reference = Column(String(300), nullable=True)
+    delivery_address = Column(Text, nullable=True)
+    gst_rate = Column(Float, nullable=False, default=18)
+    subtotal = Column(Float, nullable=False, default=0)
+    gst_amount = Column(Float, nullable=False, default=0)
+    round_off = Column(Float, nullable=False, default=0)
+    grand_total = Column(Float, nullable=False, default=0)
+    price_basis = Column(String(300), nullable=True)
+    packing_terms = Column(String(300), nullable=True)
+    freight_terms = Column(String(300), nullable=True)
+    insurance_terms = Column(String(300), nullable=True)
+    delivery_terms = Column(Text, nullable=True)
+    inspection_terms = Column(String(300), nullable=True)
+    warranty_terms = Column(String(300), nullable=True)
+    payment_terms = Column(String(300), nullable=True)
+    quantity_variance = Column(String(300), nullable=True)
+    notes = Column(Text, nullable=True)
+
+    order = relationship("StorePurchaseOrder", back_populates="details")
+
+
+class StorePurchaseOrderLine(Base):
+    __tablename__ = "store_purchase_order_lines"
+
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("store_purchase_orders.id"), nullable=False, index=True)
+    line_number = Column(Integer, nullable=False)
+    item_description = Column(String(500), nullable=False)
+    quantity = Column(Float, nullable=False, default=0)
+    uom = Column(String(50), nullable=False, default="Nos")
+    unit_rate = Column(Float, nullable=False, default=0)
+    amount = Column(Float, nullable=False, default=0)
+
+    order = relationship("StorePurchaseOrder", back_populates="line_items")
+
+
+class StorePurchaseMaterialReceipt(Base):
+    """Goods received record that posts its accepted quantities to Inventory."""
+    __tablename__ = "store_purchase_material_receipts"
+
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("store_purchase_orders.id"), nullable=False, index=True)
+    invoice_date = Column(Date, nullable=False)
+    invoice_number = Column(String(150), nullable=False)
+    freight_charge = Column(Float, nullable=False, default=0)
+    bill_file_url = Column(String(500), nullable=True)
+    vendor_name = Column(String(200), nullable=False)
+    reference = Column(String(300), nullable=True)
+    vendor_code = Column(String(100), nullable=True)
+    remarks = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    updated_by = Column(String(100), nullable=True)
+    payment_status = Column(String(30), nullable=False, default="Unpaid")
+    amount_paid = Column(Float, nullable=True, default=0)
+    payment_date = Column(Date, nullable=True)
+    payment_reference = Column(String(200), nullable=True)
+
+    order = relationship("StorePurchaseOrder", back_populates="material_receipts")
+    lines = relationship("StorePurchaseMaterialReceiptLine", back_populates="receipt", cascade="all, delete-orphan", order_by="StorePurchaseMaterialReceiptLine.line_number")
+
+
+class StorePurchaseMaterialReceiptLine(Base):
+    __tablename__ = "store_purchase_material_receipt_lines"
+
+    id = Column(Integer, primary_key=True)
+    receipt_id = Column(Integer, ForeignKey("store_purchase_material_receipts.id"), nullable=False, index=True)
+    line_number = Column(Integer, nullable=False)
+    item_description = Column(String(500), nullable=False)
+    ordered_quantity = Column(Float, nullable=False, default=0)
+    received_quantity = Column(Float, nullable=False, default=0)
+    uom = Column(String(50), nullable=False, default="Nos")
+    unit_rate = Column(Float, nullable=False, default=0)
+    amount = Column(Float, nullable=False, default=0)
+
+    receipt = relationship("StorePurchaseMaterialReceipt", back_populates="lines")
 
 
 class ItemMasterItem(Base):
@@ -67,6 +351,32 @@ class ItemMasterSize(Base):
     created_by = Column(String(100), nullable=True)
 
     item = relationship("ItemMasterItem", back_populates="sizes")
+
+
+class StorePOItemMasterItem(Base):
+    """Item master used only by Store Purchase Orders, never by Marketing POs."""
+    __tablename__ = "store_po_item_master"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(300), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    updated_by = Column(String(100), nullable=True)
+
+    sizes = relationship("StorePOItemMasterSize", back_populates="item", cascade="all, delete-orphan", order_by="StorePOItemMasterSize.id")
+
+
+class StorePOItemMasterSize(Base):
+    __tablename__ = "store_po_item_master_sizes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    item_id = Column(Integer, ForeignKey("store_po_item_master.id"), nullable=False)
+    size = Column(String(500), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+
+    item = relationship("StorePOItemMasterItem", back_populates="sizes")
 
 
 class WOItemMasterItem(Base):
@@ -96,6 +406,18 @@ class WOItemMasterSize(Base):
 
 class UOMOption(Base):
     __tablename__ = "uom_options"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    updated_by = Column(String(100), nullable=True)
+
+
+class StoreUOMOption(Base):
+    """UOM choices maintained exclusively for Store Purchase Orders."""
+    __tablename__ = "store_uom_options"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False, unique=True, index=True)

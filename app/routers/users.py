@@ -2,21 +2,29 @@ from fastapi import APIRouter, Depends, HTTPException, status, Header
 from sqlalchemy.orm import Session
 from jose import jwt
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 from app.database import get_db
-from app.models.models import User, UserSession
-from app.schemas.user import UserCreate, UserUpdate, UserOut, UserLogin, Token, UserSessionOut
+from app.models.models import User, UserSession, ApplicationAccess, Application
+from app.schemas.user import UserCreate, UserUpdate, UserOut, UserLogin, Token, UserSessionOut, PasswordResetRequest, PasswordResetConfirm, PasswordChange
 from app.config import settings
 from app.utils.helpers import log_activity
-from app.utils.auth import get_user_id_from_token, require_admin
+from app.utils.auth import get_user_id_from_token, require_admin, require_super_admin, get_current_user
+from app.routers.application_access import serialize_user
 
 import uuid
 import asyncio
+import secrets
+import smtplib
+from email.message import EmailMessage
 from fastapi import WebSocket, WebSocketDisconnect
 from app.services.session_manager import manager
 
 
 router = APIRouter(prefix="/api/users", tags=["Users"])
+
+# One-time codes stay only in server memory and expire quickly. They are not
+# passwords and are removed immediately after successful use.
+password_reset_codes: dict[str, dict] = {}
 
 import bcrypt
 
@@ -67,11 +75,10 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
 
 @router.get("/pending", response_model=List[UserOut])
 def list_pending_users(
-    authorization: str = Header(default=None),
     db: Session = Depends(get_db),
+    _: User = Depends(require_super_admin),
 ):
-    """Admin-only: users who registered but have not yet been approved."""
-    require_admin(authorization, db)
+    """Super Admin only: users who registered but have not yet been approved."""
     return (
         db.query(User)
         .filter(User.is_active == False)
@@ -80,24 +87,100 @@ def list_pending_users(
     )
 
 
+from pydantic import BaseModel as _BaseModel
+class WorkspaceApproval(_BaseModel):
+    workspace: str  # "marketing" | "store" | "both"
+
 @router.post("/{user_id}/approve", response_model=UserOut)
 def approve_user(
     user_id: int,
-    authorization: str = Header(default=None),
+    payload: WorkspaceApproval,
     db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
 ):
-    """Admin-only: approve a pending registration so the user can log in."""
-    admin = require_admin(authorization, db)
+    """Super Admin only: approve a pending registration with workspace access."""
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
     user.is_active = True
+
+    # Grant access based on workspace selection
+    workspace = (payload.workspace or "both").strip().lower()
+    grant_marketing = workspace in ("marketing", "both")
+    grant_store = workspace in ("store", "both")
+
+    apps = {app.code: app for app in db.query(Application).all()}
+    for code, should_grant in [("marketing", grant_marketing), ("store_purchase", grant_store)]:
+        if code not in apps:
+            continue
+        row = db.query(ApplicationAccess).filter_by(user_id=user.id, application_id=apps[code].id).first()
+        if should_grant:
+            if not row:
+                db.add(ApplicationAccess(user_id=user.id, application_id=apps[code].id, role="user"))
+            elif row.role == "none":
+                row.role = "user"
+        else:
+            # Set role to "none" rather than deleting — access_map returns "none"
+            # which correctly restricts access in both frontend route guards and API.
+            if row:
+                row.role = "none"
+            else:
+                db.add(ApplicationAccess(user_id=user.id, application_id=apps[code].id, role="none"))
+
     db.commit()
     db.refresh(user)
 
     log_activity(
         db, "User Approved", "User",
-        f"User {user.name} was approved by {admin.name}.",
+        f"User {user.name} approved by {admin.name} with workspace: {payload.workspace}.",
+        admin.name, user.id,
+        entity_name=user.name,
+    )
+    return user
+
+
+@router.put("/{user_id}/workspace", response_model=UserOut)
+def update_user_workspace(
+    user_id: int,
+    payload: WorkspaceApproval,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
+):
+    """Super Admin only: change an approved user's workspace access."""
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if not user.is_active:
+        raise HTTPException(status_code=400, detail="User has not been approved yet.")
+
+    workspace = (payload.workspace or "both").strip().lower()
+    grant_marketing = workspace in ("marketing", "both")
+    grant_store = workspace in ("store", "both")
+
+    apps = {app.code: app for app in db.query(Application).all()}
+    for code, should_grant in [("marketing", grant_marketing), ("store_purchase", grant_store)]:
+        if code not in apps:
+            continue
+        row = db.query(ApplicationAccess).filter_by(user_id=user.id, application_id=apps[code].id).first()
+        if should_grant:
+            if not row:
+                db.add(ApplicationAccess(user_id=user.id, application_id=apps[code].id, role="user"))
+            elif row.role == "none":
+                row.role = "user"
+        else:
+            # Set role to "none" rather than deleting — access_map returns "none"
+            # which correctly restricts access in both frontend route guards and API.
+            if row:
+                row.role = "none"
+            else:
+                db.add(ApplicationAccess(user_id=user.id, application_id=apps[code].id, role="none"))
+
+    db.commit()
+    db.refresh(user)
+
+    log_activity(
+        db, "Workspace Access Changed", "User",
+        f"User {user.name} workspace changed to {payload.workspace} by {admin.name}.",
         admin.name, user.id,
         entity_name=user.name,
     )
@@ -107,11 +190,10 @@ def approve_user(
 @router.post("/{user_id}/reject")
 def reject_user(
     user_id: int,
-    authorization: str = Header(default=None),
     db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
 ):
-    """Admin-only: reject a pending registration, removing it entirely."""
-    admin = require_admin(authorization, db)
+    """Super Admin only: reject a pending registration, removing it entirely."""
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
@@ -149,6 +231,7 @@ async def login(payload: UserLogin, db: Session = Depends(get_db)):
         request_id = str(uuid.uuid4())
         event = asyncio.Event()
         manager.pending_login_events[request_id] = event
+        manager.pending_login_users[request_id] = user.id
 
         # Notify the active session
         await manager.notify_user(user.id, {
@@ -157,21 +240,22 @@ async def login(payload: UserLogin, db: Session = Depends(get_db)):
             "message": "Someone is trying to log in to your account. Is this you?"
         })
 
-        # Wait up to 15 seconds for a response; if no response → allow login
+        # Explicit confirmation is mandatory. A timeout or a rejected prompt
+        # must never silently grant access to a second browser/device.
         try:
             await asyncio.wait_for(event.wait(), timeout=15.0)
-            approved = manager.pending_login_results.get(request_id, True)
+            approved = manager.pending_login_results.get(request_id, False)
         except asyncio.TimeoutError:
-            # No response from active session (dead tab / closed browser) → allow
-            approved = True
+            approved = False
         finally:
             manager.pending_login_events.pop(request_id, None)
             manager.pending_login_results.pop(request_id, None)
+            manager.pending_login_users.pop(request_id, None)
 
         if not approved:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Login denied by the active user.",
+                detail="Login requires approval from the active session. Please click YES, IT'S ME there and try again.",
             )
 
     token = create_access_token(user.id)
@@ -192,7 +276,7 @@ async def login(payload: UserLogin, db: Session = Depends(get_db)):
         user.name, user.id,
         entity_name=user.name,
     )
-    return Token(access_token=token, user=UserOut.model_validate(user))
+    return Token(access_token=token, user=serialize_user(user))
 
 from pydantic import BaseModel
 class LoginApproval(BaseModel):
@@ -208,6 +292,8 @@ async def approve_login(payload: LoginApproval, authorization: str = Header(defa
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token.")
     request_id = payload.request_id
     if request_id in manager.pending_login_events:
+        if manager.pending_login_users.get(request_id) != user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This login request belongs to another account.")
         manager.pending_login_results[request_id] = (payload.action == "approve")
         manager.pending_login_events[request_id].set()
         return {"message": "Action processed."}
@@ -327,7 +413,7 @@ def heartbeat(authorization: str = Header(default=None), db: Session = Depends(g
 
 
 @router.get("/active-sessions", response_model=List[UserSessionOut])
-def active_sessions(db: Session = Depends(get_db)):
+def active_sessions(db: Session = Depends(get_db), _: User = Depends(require_super_admin)):
     return (
         db.query(UserSession)
         .filter(UserSession.is_active == True)
@@ -337,7 +423,7 @@ def active_sessions(db: Session = Depends(get_db)):
 
 
 @router.get("/recent-logins", response_model=List[UserSessionOut])
-def recent_logins(db: Session = Depends(get_db)):
+def recent_logins(db: Session = Depends(get_db), _: User = Depends(require_super_admin)):
     """Returns the most recent login per user (up to 20 users), newest first.
 
     Online status is sourced from the live SSE connection list (notifications
@@ -381,12 +467,12 @@ def recent_logins(db: Session = Depends(get_db)):
 
 
 @router.get("", response_model=list[UserOut])
-def list_users(db: Session = Depends(get_db)):
+def list_users(db: Session = Depends(get_db), _: User = Depends(require_super_admin)):
     return db.query(User).filter(User.is_active == True).all()
 
 
 @router.put("/{user_id}", response_model=UserOut)
-def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)):
+def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db), _: User = Depends(require_super_admin)):
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
@@ -407,16 +493,57 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
     return user
 
 
-@router.post("/reset-password")
-def reset_password(payload: UserLogin, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == payload.email).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User with this email not found."
-        )
+def send_password_reset_otp(recipient: str, otp: str) -> None:
+    if not all([settings.SMTP_HOST, settings.SMTP_USERNAME, settings.SMTP_PASSWORD, settings.SMTP_FROM_EMAIL]):
+        raise HTTPException(status_code=503, detail="Password-reset email is not configured. Ask the system administrator to configure SMTP.")
+    message = EmailMessage()
+    message["Subject"] = "JB Engineering password reset code"
+    message["From"] = settings.SMTP_FROM_EMAIL
+    message["To"] = recipient
+    message.set_content(f"Your JB Engineering password reset code is: {otp}\n\nThis code expires in {settings.PASSWORD_RESET_OTP_EXPIRE_MINUTES} minutes. Do not share it with anyone.")
+    try:
+        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15) as smtp:
+            if settings.SMTP_USE_TLS:
+                smtp.starttls()
+            smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+            smtp.send_message(message)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Could not send reset email. Please try again later.")
 
+
+@router.post("/password-reset/request")
+def request_password_reset(payload: PasswordResetRequest, db: Session = Depends(get_db)):
+    email = payload.email.strip().lower()
+    user = db.query(User).filter(User.email == email, User.is_active == True).first()
+    # Same response prevents an attacker from discovering which emails exist.
+    if not user:
+        return {"message": "If this email is registered, an OTP has been sent."}
+    otp = f"{secrets.randbelow(1_000_000):06d}"
+    send_password_reset_otp(user.email, otp)
+    password_reset_codes[email] = {"otp": otp, "expires_at": datetime.utcnow() + timedelta(minutes=settings.PASSWORD_RESET_OTP_EXPIRE_MINUTES), "attempts": 0}
+    return {"message": "If this email is registered, an OTP has been sent."}
+
+
+@router.post("/password-reset/confirm")
+def confirm_password_reset(payload: PasswordResetConfirm, db: Session = Depends(get_db)):
+    email = payload.email.strip().lower()
+    stored = password_reset_codes.get(email)
+    if not stored or datetime.utcnow() > stored["expires_at"]:
+        password_reset_codes.pop(email, None)
+        raise HTTPException(status_code=400, detail="OTP expired or invalid. Request a new code.")
+    if stored["attempts"] >= 5:
+        password_reset_codes.pop(email, None)
+        raise HTTPException(status_code=429, detail="Too many incorrect OTP attempts. Request a new code.")
+    if not secrets.compare_digest(stored["otp"], payload.otp.strip()):
+        stored["attempts"] += 1
+        raise HTTPException(status_code=400, detail="Incorrect OTP.")
+    if len(payload.password) < 8:
+        raise HTTPException(status_code=422, detail="Password must contain at least 8 characters.")
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="OTP expired or invalid. Request a new code.")
     user.hashed_password = hash_password(payload.password)
+    password_reset_codes.pop(email, None)
     db.commit()
     log_activity(
         db, "Password Reset", "User",
@@ -424,4 +551,17 @@ def reset_password(payload: UserLogin, db: Session = Depends(get_db)):
         user.name, user.id,
         entity_name=user.name,
     )
+    return {"message": "Password updated successfully."}
+
+
+@router.post("/password/change")
+def change_password(payload: PasswordChange, db: Session = Depends(get_db)):
+    """Simple no-email password change: knowledge of the current password is
+    required, so an email address alone cannot be used to take over an account."""
+    user = db.query(User).filter(User.email == payload.email.strip().lower(), User.is_active == True).first()
+    if not user or not verify_password(payload.current_password, user.hashed_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Email or current password is incorrect.")
+    user.hashed_password = hash_password(payload.password)
+    db.commit()
+    log_activity(db, "Password Changed", "User", f"User {user.name} changed their password.", user.name, user.id, entity_name=user.name)
     return {"message": "Password updated successfully."}

@@ -11,7 +11,7 @@ from app.routers.work_order_sales import recalc_wo_completed_quantities
 
 # Import all models
 from app.models.models import (
-    User, ItemMasterItem, ItemMasterSize, WOItemMasterItem, WOItemMasterSize,
+    User, Application, ApplicationAccess, ItemMasterItem, ItemMasterSize, WOItemMasterItem, WOItemMasterSize,
     UOMOption, Client, Project, Product, PurchaseOrder, POLineItem,
     Sale, SaleItem, SaleActivity, SaleDispatch, SaleDispatchItem,
     Record, SystemLog, WorkOrder, WOLineItem, WorkOrderSale,
@@ -25,7 +25,12 @@ router = APIRouter(prefix="/api/system", tags=["System"])
 # Note: For export, order doesn't matter much. For import, we use SET FOREIGN_KEY_CHECKS=0 
 # but it's good practice to have them ordered.
 MODELS = [
+    # Applications must be exported/imported before their access rows.  Keeping
+    # access rows in this list also makes replace mode clear them before users,
+    # avoiding the users -> application_access foreign-key violation.
+    Application,
     User,
+    ApplicationAccess,
     CompanyAddress,
     Client,
     Project,
@@ -160,6 +165,8 @@ async def import_database(
 
         UNIQUE_KEYS = {
             'users': ['email'],
+            'applications': ['code'],
+            'application_access': ['user_id', 'application_id'],
             'company_addresses': ['title'],
             'clients': ['name'],
             'projects': ['name', 'client_id'],
@@ -194,7 +201,20 @@ async def import_database(
         
         # If replace mode, clear database first in correct dependency order
         if import_type == "replace":
+            # These two tables reference users directly and must be emptied
+            # explicitly before the parent users table.  Doing this up front
+            # also keeps replace imports compatible with older MODELS lists.
+            db.query(ApplicationAccess).delete(synchronize_session=False)
+            db.query(UserSession).delete(synchronize_session=False)
+            db.flush()
             for model in reversed(MODELS):
+                if model in (ApplicationAccess, UserSession):
+                    continue
+                # Older backup files predate the application tables.  Keep the
+                # seeded application catalog in that case; deleting it would
+                # leave a restored database without Marketing/Store apps.
+                if model.__tablename__ == "applications" and "applications" not in backup_data:
+                    continue
                 db.query(model).delete()
             db.commit()
             
