@@ -42,8 +42,17 @@ def my_access(current_user: User = Depends(get_current_user), db: Session = Depe
         db.commit()
     return serialize_user(current_user)
 
+SUPER_ADMIN_EMAILS_LOCAL = {"deepikar412003@gmail.com"}
+
 @router.get("/users")
-def users(_: User = Depends(require_super_admin), db: Session = Depends(get_db)) -> List[dict]:
+def users(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> List[dict]:
+    is_super = bool(current_user.is_super_admin) or (current_user.email or "").lower() in SUPER_ADMIN_EMAILS_LOCAL
+    if not is_super:
+        raise HTTPException(status_code=403, detail="Super Admin access required.")
+    # Auto-promote in DB if needed
+    if not current_user.is_super_admin and (current_user.email or "").lower() in SUPER_ADMIN_EMAILS_LOCAL:
+        current_user.is_super_admin = True
+        db.commit()
     return [serialize_user(user) for user in db.query(User).order_by(User.name).all()]
 
 @router.put("/users/{user_id}")
