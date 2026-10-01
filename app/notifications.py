@@ -59,6 +59,12 @@ def remove_client(q: asyncio.Queue, user_id: Optional[int] = None) -> None:
             _user_conn_count.pop(user_id, None)
 
 
+def remove_user(user_id: int) -> None:
+    """Explicitly remove a user from the in-memory online users list (used on logout/force-logout)."""
+    _online_users.pop(user_id, None)
+    _user_conn_count.pop(user_id, None)
+
+
 def get_online_users() -> list:
     return list(_online_users.values())
 

@@ -377,6 +377,9 @@ def logout(authorization: str = Header(default=None), db: Session = Depends(get_
         session.logout_at = datetime.utcnow()
         db.commit()
 
+    from app import notifications
+    notifications.remove_user(user_id)
+
     log_activity(
         db, "User Logged Out", "User",
         f"User {user.name} logged out.",
@@ -384,6 +387,46 @@ def logout(authorization: str = Header(default=None), db: Session = Depends(get_
         entity_name=user.name,
     )
     return {"message": "Logged out successfully."}
+
+
+@router.post("/{user_id}/force-logout")
+async def force_logout_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
+):
+    """Super Admin only: forcefully log out any user session."""
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Mark all active sessions as logged out
+    sessions = (
+        db.query(UserSession)
+        .filter(UserSession.user_id == user_id, UserSession.is_active == True)
+        .all()
+    )
+    for session in sessions:
+        session.is_active = False
+        session.logout_at = datetime.utcnow()
+    db.commit()
+
+    from app import notifications
+    notifications.remove_user(user_id)
+
+    # Terminate active websocket connections for this user
+    await manager.force_disconnect_user(
+        user_id,
+        {"type": "FORCE_LOGOUT", "message": "Your session has been terminated by the administrator."}
+    )
+
+    log_activity(
+        db, "Force Logout", "User",
+        f"User {user.name} was forcefully logged out by {admin.name}.",
+        admin.name, user.id,
+        entity_name=user.name,
+    )
+    return {"message": f"User {user.name} has been logged out."}
 
 
 @router.post("/heartbeat", response_model=UserSessionOut)

@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime
 import re
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -5,7 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.database import get_db
-from app.models.models import StorePurchaseItem, StorePurchaseStockItem, StorePurchaseOrder, StorePurchaseOrderActivity, StorePurchaseOrderDetail, StorePurchaseOrderLine, StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine, StorePurchaseStockTransaction, StorePurchaseStockTransfer, StorePOItemMasterItem, User, POApprovalLevel, POApprovalLevelApprover, StorePurchaseOrderApproval
+from app.models.models import StoreVendor, StorePurchaseItem, StorePurchaseStockItem, StorePurchaseOrder, StorePurchaseOrderActivity, StorePurchaseOrderDetail, StorePurchaseOrderLine, StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine, StorePurchaseStockTransaction, StorePurchaseStockTransfer, StorePOItemMasterItem, User, POApprovalLevel, POApprovalLevelApprover, StorePurchaseOrderApproval
 from app.utils.auth import get_current_user, require_application_access, require_super_admin
 from app.routers.upload_helpers import read_upload_bytes, save_upload_bytes
 
@@ -881,3 +882,104 @@ def _material_receipt_response(receipt: StorePurchaseMaterialReceipt):
                    "ordered_quantity": line.ordered_quantity, "received_quantity": line.received_quantity,
                    "uom": line.uom, "unit_rate": line.unit_rate, "amount": line.amount} for line in receipt.lines],
     }
+
+
+class StoreVendorPayload(BaseModel):
+    vendor_name: str
+    person_name: str | None = None
+    vendor_gst: str | None = None
+    contact: str | None = None
+    address: str | None = None
+    items_supplied: list[str] | str | None = None
+    status: str = "Active"
+
+
+def _serialize_vendor(v: StoreVendor):
+    items = []
+    if v.items_supplied:
+        try:
+            items = json.loads(v.items_supplied)
+            if not isinstance(items, list):
+                items = [str(items)]
+        except Exception:
+            items = [x.strip() for x in v.items_supplied.split(",") if x.strip()]
+    return {
+        "id": v.id,
+        "vendor_name": v.vendor_name,
+        "person_name": v.person_name,
+        "vendor_gst": v.vendor_gst,
+        "contact": v.contact,
+        "address": v.address,
+        "items_supplied": items,
+        "status": v.status or "Active",
+        "created_at": v.created_at.isoformat() if v.created_at else None,
+        "updated_at": v.updated_at.isoformat() if v.updated_at else None,
+    }
+
+
+@router.get("/vendors")
+def list_vendors(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    require_application_access(user, db, "store_purchase")
+    vendors = db.query(StoreVendor).order_by(StoreVendor.vendor_name.asc()).all()
+    return [_serialize_vendor(v) for v in vendors]
+
+
+@router.post("/vendors")
+def create_vendor(payload: StoreVendorPayload, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    require_application_access(user, db, "store_purchase", admin=True)
+    if not payload.vendor_name.strip():
+        raise HTTPException(status_code=400, detail="Vendor name is required.")
+    items_str = ""
+    if isinstance(payload.items_supplied, list):
+        items_str = json.dumps(payload.items_supplied)
+    elif isinstance(payload.items_supplied, str):
+        items_str = payload.items_supplied.strip()
+
+    vendor = StoreVendor(
+        vendor_name=payload.vendor_name.strip(),
+        person_name=payload.person_name.strip() if payload.person_name else None,
+        vendor_gst=payload.vendor_gst.strip() if payload.vendor_gst else None,
+        contact=payload.contact.strip() if payload.contact else None,
+        address=payload.address.strip() if payload.address else None,
+        items_supplied=items_str,
+        status=payload.status or "Active",
+    )
+    db.add(vendor)
+    db.commit()
+    db.refresh(vendor)
+    return _serialize_vendor(vendor)
+
+
+@router.put("/vendors/{vendor_id}")
+def update_vendor(vendor_id: int, payload: StoreVendorPayload, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    require_application_access(user, db, "store_purchase", admin=True)
+    vendor = db.get(StoreVendor, vendor_id)
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found.")
+    if payload.vendor_name:
+        vendor.vendor_name = payload.vendor_name.strip()
+    vendor.person_name = payload.person_name.strip() if payload.person_name else None
+    vendor.vendor_gst = payload.vendor_gst.strip() if payload.vendor_gst else None
+    vendor.contact = payload.contact.strip() if payload.contact else None
+    vendor.address = payload.address.strip() if payload.address else None
+    if payload.items_supplied is not None:
+        if isinstance(payload.items_supplied, list):
+            vendor.items_supplied = json.dumps(payload.items_supplied)
+        else:
+            vendor.items_supplied = str(payload.items_supplied).strip()
+    if payload.status:
+        vendor.status = payload.status
+    db.commit()
+    db.refresh(vendor)
+    return _serialize_vendor(vendor)
+
+
+@router.delete("/vendors/{vendor_id}")
+def delete_vendor(vendor_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    require_application_access(user, db, "store_purchase", admin=True)
+    vendor = db.get(StoreVendor, vendor_id)
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found.")
+    db.delete(vendor)
+    db.commit()
+    return {"message": "Vendor deleted successfully."}

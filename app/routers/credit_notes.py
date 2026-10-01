@@ -252,6 +252,21 @@ def update_credit_note(
     current_user: User = Depends(require_admin_for_write),
 ):
     cn = _load_cn(cn_id, db)
+    if payload.cn_number is not None:
+        clean_cn_no = (payload.cn_number or "").strip()
+        if clean_cn_no and clean_cn_no != cn.cn_number:
+            existing = (
+                db.query(CreditNote.id)
+                .filter(
+                    CreditNote.cn_number == clean_cn_no,
+                    CreditNote.id != cn_id,
+                    CreditNote.is_deleted == False,
+                )
+                .first()
+            )
+            if existing:
+                raise HTTPException(status_code=400, detail="Credit Note Number already exists")
+            cn.cn_number = clean_cn_no
     if payload.cn_date is not None:
         cn.cn_date = payload.cn_date
     if payload.reason is not None:
@@ -269,7 +284,19 @@ def update_credit_note(
     for field in ("sale_id", "wo_sale_id", "invoice_number", "invoice_date", "po_number", "client_name", "project"):
         value = getattr(payload, field)
         if value is not None:
+            if field == "client_name" and not str(value).strip():
+                continue
             setattr(cn, field, value)
+
+    if not (cn.client_name or "").strip():
+        if cn.sale_type == "PO" and cn.sale_id:
+            s = db.query(Sale).filter(Sale.id == cn.sale_id).first()
+            if s and s.client_name:
+                cn.client_name = s.client_name
+        elif cn.sale_type == "WO" and cn.wo_sale_id:
+            ws = db.query(WorkOrderSale).filter(WorkOrderSale.id == cn.wo_sale_id).first()
+            if ws and ws.client_name:
+                cn.client_name = ws.client_name
 
     if payload.items is not None:
         old_items = db.query(CreditNoteItem).filter(CreditNoteItem.credit_note_id == cn_id).all()

@@ -38,4 +38,17 @@ class ConnectionManager:
                 except Exception:
                     pass
 
+    async def force_disconnect_user(self, user_id: int, message: dict = None):
+        if user_id in self.active_connections:
+            conns = list(self.active_connections[user_id])
+            for connection in conns:
+                try:
+                    if message:
+                        await connection.send_json(message)
+                    await connection.close(code=1000)
+                except Exception:
+                    pass
+            self.active_connections.pop(user_id, None)
+
+
 manager = ConnectionManager()

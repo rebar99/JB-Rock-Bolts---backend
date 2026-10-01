@@ -42,6 +42,16 @@ class User(Base):
 
     application_access = relationship("ApplicationAccess", back_populates="user", cascade="all, delete-orphan")
 
+    @property
+    def is_admin(self) -> bool:
+        if getattr(self, "is_super_admin", False):
+            return True
+        if hasattr(self, "application_access") and self.application_access:
+            for acc in self.application_access:
+                if getattr(acc, "role", None) == "admin":
+                    return True
+        return False
+
 
 class Application(Base):
     __tablename__ = "applications"
@@ -1274,3 +1284,17 @@ class CreditNoteItem(Base):
 
     credit_note = relationship("CreditNote", back_populates="items")
 
+
+class StoreVendor(Base):
+    __tablename__ = "store_vendors"
+
+    id = Column(Integer, primary_key=True, index=True)
+    vendor_name = Column(String(255), nullable=False, index=True)
+    person_name = Column(String(255), nullable=True)
+    vendor_gst = Column(String(50), nullable=True)
+    contact = Column(String(100), nullable=True)
+    address = Column(Text, nullable=True)
+    items_supplied = Column(Text, nullable=True)
+    status = Column(String(50), nullable=False, default="Active")
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

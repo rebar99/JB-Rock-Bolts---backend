@@ -1,4 +1,4 @@
-﻿from pydantic import BaseModel
+from pydantic import BaseModel
 from datetime import date
 from typing import Optional, List
 from app.schemas.base import UTCDatetime
@@ -66,6 +66,7 @@ class CreditNoteCreate(BaseModel):
 
 
 class CreditNoteUpdate(BaseModel):
+    cn_number: Optional[str] = None
     sale_id: Optional[int] = None
     wo_sale_id: Optional[int] = None
     invoice_number: Optional[str] = None

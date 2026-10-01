@@ -8,7 +8,7 @@ from app.models.models import User, WorkOrder, WOLineItem
 from app.schemas.work_order import WorkOrderCreate, WorkOrderUpdate, WorkOrderOut, WorkOrderClose
 from app.schemas.bulk import BulkDeleteRequest, BulkDeleteResult
 from app.utils.helpers import log_activity, generate_wo_number, values_equal_for_update
-from app.utils.auth import get_current_user, require_admin, get_user_id_from_token, require_admin_for_write
+from app.utils.auth import get_current_user, require_admin, get_user_id_from_token, require_admin_for_write, application_role
 from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
     parse_optional_datetime, make_excel_response, style_header_row,
@@ -390,12 +390,15 @@ def update_work_order(wo_id: int, payload: WorkOrderUpdate, authorization: str =
             quantity_changed = True
             
         if quantity_changed:
-            user_id = get_user_id_from_token(authorization) if authorization else None
-            user = db.get(User, user_id) if user_id else None
-            if not user or not user.is_admin:
+            user = current_user or (db.get(User, get_user_id_from_token(authorization)) if authorization else None)
+            is_mkt_admin = (
+                user.is_super_admin or application_role(user, db, "marketing") == "admin"
+                if user else False
+            )
+            if not is_mkt_admin:
                 raise HTTPException(
                     status_code=403,
-                    detail="Only Admin can update PO quantity." if not True else "Only Admin can update Work Order quantity."
+                    detail="Only Admin can update Work Order quantity."
                 )
 
         if existing_signature != new_signature:

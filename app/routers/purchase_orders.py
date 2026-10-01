@@ -4,12 +4,11 @@ from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 from app.database import get_db
-from app.models.models import PurchaseOrder, POLineItem
 from app.schemas.purchase_order import PurchaseOrderCreate, PurchaseOrderUpdate, PurchaseOrderOut, PurchaseOrderShortClose
 from app.schemas.bulk import BulkDeleteRequest, BulkDeleteResult
 from app.utils.helpers import log_activity, recalc_po_delivered_quantities, values_equal_for_update
-from app.utils.auth import require_admin, get_user_id_from_token, get_current_user, require_admin_for_write
-from app.models.models import User
+from app.utils.auth import require_admin, get_user_id_from_token, get_current_user, require_admin_for_write, application_role
+from app.models.models import PurchaseOrder, POLineItem, User
 from app.routers.upload_helpers import (
     read_upload_bytes, save_upload_bytes, parse_import_file,
     parse_optional_datetime, make_excel_response, style_header_row,
@@ -399,12 +398,15 @@ def update_purchase_order(po_id: int, payload: PurchaseOrderUpdate, authorizatio
             quantity_changed = True
             
         if quantity_changed:
-            user_id = get_user_id_from_token(authorization) if authorization else None
-            user = db.get(User, user_id) if user_id else None
-            if not user or not user.is_admin:
+            user = current_user or (db.get(User, get_user_id_from_token(authorization)) if authorization else None)
+            is_mkt_admin = (
+                user.is_super_admin or application_role(user, db, "marketing") == "admin"
+                if user else False
+            )
+            if not is_mkt_admin:
                 raise HTTPException(
                     status_code=403,
-                    detail="Only Admin can update PO quantity." if not False else "Only Admin can update Work Order quantity."
+                    detail="Only Admin can update PO quantity."
                 )
 
         if existing_signature != new_signature:
