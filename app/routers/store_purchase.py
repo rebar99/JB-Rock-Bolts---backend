@@ -30,7 +30,8 @@ class ItemPayload(BaseModel):
 class IssuePayload(BaseModel):
     quantity: float = Field(gt=0)
     required_for: str | None = None
-    issued_to: str = Field(min_length=1, max_length=200)
+    issued_to: str | None = None
+    location: str | None = None
     issue_date: date | None = None
     remarks: str | None = None
 
@@ -424,6 +425,10 @@ def issue_item(item_id: int, payload: IssuePayload, user: User = Depends(store_a
     if not item: raise HTTPException(status_code=404, detail="Material not found.")
     if payload.quantity > item.quantity:
         raise HTTPException(status_code=422, detail=f"Insufficient stock. Only {item.quantity:g} units are available.")
+    issued_to = (payload.issued_to or "").strip()
+    target_location = (payload.location or "").strip()
+    if not issued_to and not target_location:
+        raise HTTPException(status_code=422, detail="Department / Person or Location is required.")
     issue_date = payload.issue_date or date.today()
     item.quantity -= payload.quantity
     item.issued_quantity = (item.issued_quantity or 0) + payload.quantity
@@ -443,9 +448,11 @@ def issue_item(item_id: int, payload: IssuePayload, user: User = Depends(store_a
         remaining_to_issue -= issued_from_stock
     item.required_for = payload.required_for or item.required_for
     item.status = _status(item.quantity, item.reorder_level)
+    final_issued_to = issued_to or target_location
+    final_location = target_location or item.location
     tx = StorePurchaseStockTransaction(item_id=item.id, transaction_type="ISSUE", quantity=payload.quantity,
         rate=item.rate or 0, amount=round(payload.quantity * (item.rate or 0), 2), transaction_date=issue_date,
-        required_for=payload.required_for, issued_to=payload.issued_to, location=item.location, remarks=payload.remarks,
+        required_for=payload.required_for, issued_to=final_issued_to, location=final_location, remarks=payload.remarks,
         created_by=user.name)
     db.add(tx); db.commit(); db.refresh(item); return {"item": _item_response(item), "transaction": _transaction_response(tx)}
 

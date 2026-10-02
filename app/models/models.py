@@ -1223,7 +1223,7 @@ class CreditNote(Base):
     __tablename__ = "credit_notes"
 
     id = Column(Integer, primary_key=True, index=True)
-    cn_number = Column(String(50), nullable=False, unique=True, index=True)
+    cn_number = Column(String(50), nullable=False, index=True)
     cn_date = Column(Date, nullable=False)
     sale_type = Column(String(5), nullable=False)  # 'PO' or 'WO'
 

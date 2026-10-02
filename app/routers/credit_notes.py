@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
 from datetime import datetime, timedelta
 
@@ -43,9 +44,21 @@ def list_credit_notes(
         q = q.filter(CreditNote.sale_type == sale_type.upper())
     if sale_id:
         q = q.filter(CreditNote.sale_id == sale_id)
-    if wo_sale_id:
-        q = q.filter(CreditNote.wo_sale_id == wo_sale_id)
-    return q.order_by(CreditNote.created_at.desc()).all()
+    records = q.all()
+    import re
+    def natural_sort_key(cn):
+        s = cn.cn_number or ""
+        return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
+    records.sort(key=natural_sort_key)
+    return records
+
+
+@router.get("/next-number")
+def get_next_credit_note_number(
+    sale_type: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    return {"next_cn_number": generate_credit_note_number(db, sale_type)}
 
 
 # ── Already-credited qty per item for a PO sale ──────────────────────────────
@@ -131,9 +144,13 @@ def create_credit_note(
     client_name = source_sale.client_name if source_sale else payload.client_name
     project = getattr(source_sale, "project", None) if source_sale else payload.project
 
-    cn_number = (payload.cn_number or "").strip() or generate_credit_note_number(db)
-    if db.query(CreditNote.id).filter(CreditNote.cn_number == cn_number).first():
-        raise HTTPException(status_code=400, detail="Credit Note Number already exists")
+    cn_number = (payload.cn_number or "").strip() or generate_credit_note_number(db, payload.sale_type)
+    if db.query(CreditNote.id).filter(
+        CreditNote.cn_number == cn_number,
+        CreditNote.sale_type == payload.sale_type.upper(),
+        CreditNote.is_deleted == False,
+    ).first():
+        raise HTTPException(status_code=400, detail="Credit Note Number already exists for this type")
 
     cn = CreditNote(
         cn_number=cn_number,
@@ -183,8 +200,15 @@ def create_credit_note(
     cn.gst_amount = gst_amount
     cn.total_amount = total_amount
 
-    db.commit()
-    db.refresh(cn)
+    try:
+        db.commit()
+        db.refresh(cn)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Credit Note Number '{cn_number}' already exists for this type"
+        )
 
     # ── Increase PO/WO ordered quantity for each credited item ────────────
     # When a credit note is issued (items returned), those units need to be
@@ -252,6 +276,7 @@ def update_credit_note(
     current_user: User = Depends(require_admin_for_write),
 ):
     cn = _load_cn(cn_id, db)
+    clean_cn_no = cn.cn_number
     if payload.cn_number is not None:
         clean_cn_no = (payload.cn_number or "").strip()
         if clean_cn_no and clean_cn_no != cn.cn_number:
@@ -259,13 +284,14 @@ def update_credit_note(
                 db.query(CreditNote.id)
                 .filter(
                     CreditNote.cn_number == clean_cn_no,
+                    CreditNote.sale_type == cn.sale_type,
                     CreditNote.id != cn_id,
                     CreditNote.is_deleted == False,
                 )
                 .first()
             )
             if existing:
-                raise HTTPException(status_code=400, detail="Credit Note Number already exists")
+                raise HTTPException(status_code=400, detail="Credit Note Number already exists for this type")
             cn.cn_number = clean_cn_no
     if payload.cn_date is not None:
         cn.cn_date = payload.cn_date
@@ -357,7 +383,14 @@ def update_credit_note(
         cn.gst_amount = gst_amount
         cn.total_amount = total_amount
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Credit Note Number '{clean_cn_no}' already exists for this type"
+        )
 
     # ── Apply new credited qty to PO/WO ordered quantity + recalc ────────
     if payload.items is not None:

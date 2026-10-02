@@ -250,13 +250,52 @@ def generate_wo_invoice_number(db: Session) -> str:
     return f"WINV-{year}-{str(count + 1).zfill(4)}"
 
 
-def generate_credit_note_number(db: Session) -> str:
+def generate_credit_note_number(db: Session, sale_type: str = None) -> str:
+    import re
     from app.models.models import CreditNote
-    year = datetime.now().year
-    count = db.query(CreditNote).filter(
-        CreditNote.cn_number.like(f"CN-{year}-%")
-    ).count()
-    return f"CN-{year}-{str(count + 1).zfill(4)}"
+
+    st = (sale_type or "PO").upper()
+    default_prefix = "CR-"
+    default_pad = 2
+
+    q = db.query(CreditNote).filter(
+        CreditNote.is_deleted == False,
+        CreditNote.sale_type == st
+    )
+    cns = q.order_by(CreditNote.created_at.desc()).all()
+
+    latest_prefix = default_prefix
+    latest_pad = default_pad
+    for cn in cns:
+        s = (cn.cn_number or "").strip()
+        if s.upper().startswith(default_prefix.upper()):
+            m = re.match(r'^(.*?)(\d+)$', s)
+            if m:
+                latest_prefix = m.group(1)
+                latest_pad = max(default_pad, len(m.group(2)))
+                break
+
+    max_num = 0
+    for cn in cns:
+        s = (cn.cn_number or "").strip()
+        if s.upper().startswith(latest_prefix.upper()):
+            m = re.match(r'^(.*?)(\d+)$', s)
+            if m:
+                num = int(m.group(2))
+                if num > max_num:
+                    max_num = num
+
+    next_num = max_num + 1
+    while True:
+        candidate = f"{latest_prefix}{str(next_num).zfill(latest_pad)}"
+        exists = db.query(CreditNote.id).filter(
+            CreditNote.cn_number == candidate,
+            CreditNote.sale_type == st,
+            CreditNote.is_deleted == False
+        ).first()
+        if not exists:
+            return candidate
+        next_num += 1
 
 
 def compute_line_taxable_and_gst(quantity: float, unit_price: float, gst_rate: float) -> tuple:

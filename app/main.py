@@ -372,6 +372,26 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     pass
 
+            # Allow dedicated series (e.g. CR-01) for each sale_type (PO vs WO)
+            # and ignore soft-deleted records so they don't block active numbers.
+            for drop_idx in ["cn_number", "uq_credit_notes_cn_number", "ix_credit_notes_cn_number", "uq_credit_notes_type_cn"]:
+                try:
+                    conn.execute(text(f"ALTER TABLE credit_notes DROP INDEX {drop_idx}"))
+                except Exception:
+                    pass
+            try:
+                conn.execute(text("ALTER TABLE credit_notes ADD INDEX ix_credit_notes_cn_number (cn_number)"))
+            except Exception:
+                pass
+            try:
+                conn.execute(text("ALTER TABLE credit_notes ADD COLUMN active_cn_number VARCHAR(50) GENERATED ALWAYS AS (IF(is_deleted = 0, cn_number, NULL)) VIRTUAL"))
+            except Exception:
+                pass
+            try:
+                conn.execute(text("ALTER TABLE credit_notes ADD UNIQUE INDEX uq_credit_notes_active (sale_type, active_cn_number)"))
+            except Exception:
+                pass
+
             # Store Purchase material ledger fields. Existing item masters and
             # balances are intentionally retained; the new columns merely add
             # receipt, valuation and issue-history capability.
