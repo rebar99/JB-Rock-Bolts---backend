@@ -511,6 +511,7 @@ def log_activity(
     entity_name: str = None,
     changed_fields: str = None,
     status: str = "Success",
+    workspace: str = "Marketing",
 ):
     from app.models.models import SystemLog
     from app import notifications
@@ -524,6 +525,7 @@ def log_activity(
             changed_fields=changed_fields,
             status=status,
             user=user,
+            workspace=workspace,
         )
         db.add(log_entry)
         db.commit()

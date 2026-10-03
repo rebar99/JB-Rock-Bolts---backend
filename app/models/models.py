@@ -883,6 +883,8 @@ class SystemLog(Base):
     changed_fields = Column(Text, nullable=True)
     status = Column(String(50), nullable=True, default="Success")
     user = Column(String(100), nullable=True)
+    # Which application workspace produced this log (e.g. "Marketing", "Store")
+    workspace = Column(String(50), nullable=True, default="Marketing")
     created_at = Column(DateTime, server_default=func.now())
 
 

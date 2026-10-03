@@ -8,6 +8,7 @@ from sqlalchemy import func
 from app.database import get_db
 from app.models.models import StoreVendor, StorePurchaseItem, StorePurchaseStockItem, StorePurchaseOrder, StorePurchaseOrderActivity, StorePurchaseOrderDetail, StorePurchaseOrderLine, StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine, StorePurchaseStockTransaction, StorePurchaseStockTransfer, StorePOItemMasterItem, User, POApprovalLevel, POApprovalLevelApprover, StorePurchaseOrderApproval
 from app.utils.auth import get_current_user, require_application_access, require_super_admin
+from app.utils.helpers import log_activity
 from app.routers.upload_helpers import read_upload_bytes, save_upload_bytes
 
 router = APIRouter(prefix="/api/store-purchase", tags=["Store Purchase"])
@@ -380,7 +381,9 @@ def act_on_approval(order_id: int, payload: ApprovalActionPayload, user: User = 
     row.action = payload.action; row.action_at = datetime.utcnow(); row.rejection_reason = (payload.rejection_reason or "").strip() or None
     _set_current_approval_status(order)
     db.add(StorePurchaseOrderActivity(order_id=order.id, action=f"Approval {payload.action}", details=f"{row.level_name}" + (f": {row.rejection_reason}" if row.rejection_reason else ""), performed_by=user.name))
-    db.commit(); db.refresh(order); return _order_response(order)
+    db.commit(); db.refresh(order)
+    log_activity(db, f"Store PO {payload.action}", "StorePurchaseOrder", f"Store PO {order.order_number} {payload.action.lower()} by {user.name}.", user.name, entity_id=order.id, entity_name=order.order_number, workspace="Store")
+    return _order_response(order)
 
 @router.get("/dashboard")
 def dashboard(_: User = Depends(store_user), db: Session = Depends(get_db)):
@@ -406,7 +409,9 @@ def create_item(payload: ItemPayload, _: User = Depends(store_admin), db: Sessio
     item.reorder_level = payload.reorder_level
     if not existing: item.previous_quantity = payload.previous_quantity
     item.current_month_quantity = payload.current_month_quantity
-    db.commit(); db.refresh(item); return _item_response(item)
+    db.commit(); db.refresh(item)
+    log_activity(db, "Inventory Added", "StoreInventory", f"Added inventory item '{item.name}' (qty: {payload.quantity}).", _.name, entity_id=item.id, entity_name=item.name, workspace="Store")
+    return _item_response(item)
 
 @router.put("/inventory/{item_id}")
 def update_item(item_id: int, payload: ItemPayload, _: User = Depends(store_admin), db: Session = Depends(get_db)):
@@ -417,7 +422,9 @@ def update_item(item_id: int, payload: ItemPayload, _: User = Depends(store_admi
         raise HTTPException(status_code=409, detail="This Group Name and Items Name combination already exists.")
     for key, value in payload.model_dump(exclude={"quantity", "previous_quantity"}).items(): setattr(item, key, value)
     item.status = _status(item.quantity, item.reorder_level)
-    db.commit(); db.refresh(item); return _item_response(item)
+    db.commit(); db.refresh(item)
+    log_activity(db, "Inventory Updated", "StoreInventory", f"Updated inventory item '{item.name}'.", _.name, entity_id=item.id, entity_name=item.name, workspace="Store")
+    return _item_response(item)
 
 @router.post("/inventory/{item_id}/issue")
 def issue_item(item_id: int, payload: IssuePayload, user: User = Depends(store_admin), db: Session = Depends(get_db)):
@@ -454,7 +461,9 @@ def issue_item(item_id: int, payload: IssuePayload, user: User = Depends(store_a
         rate=item.rate or 0, amount=round(payload.quantity * (item.rate or 0), 2), transaction_date=issue_date,
         required_for=payload.required_for, issued_to=final_issued_to, location=final_location, remarks=payload.remarks,
         created_by=user.name)
-    db.add(tx); db.commit(); db.refresh(item); return {"item": _item_response(item), "transaction": _transaction_response(tx)}
+    db.add(tx); db.commit(); db.refresh(item)
+    log_activity(db, "Stock Issued", "StoreInventory", f"Issued {payload.quantity} unit(s) of '{item.name}' to {final_issued_to}.", user.name, entity_id=item.id, entity_name=item.name, workspace="Store")
+    return {"item": _item_response(item), "transaction": _transaction_response(tx)}
 
 def _transaction_response(tx: StorePurchaseStockTransaction):
     return {"id": tx.id, "type": tx.transaction_type, "quantity": tx.quantity, "rate": tx.rate, "amount": tx.amount,
@@ -654,6 +663,7 @@ def create_material_receipt(payload: MaterialReceiptPayload, user: User = Depend
         )
     _refresh_po_received_status(db, order)
     db.commit(); db.refresh(receipt)
+    log_activity(db, "Materials Received", "StorePurchaseOrder", f"Materials received for PO {order.order_number} (Invoice: {invoice_number}).", user.name, entity_id=order.id, entity_name=order.order_number, workspace="Store")
     return _material_receipt_response(receipt)
 
 
@@ -751,6 +761,7 @@ def create_order(payload: OrderPayload, user: User = Depends(store_admin), db: S
     # Saving a PO records only the vendor order; stock changes happen only via
     # Add/New Stock and Stock Operations, never by a PO create/update action.
     db.commit(); db.refresh(order)
+    log_activity(db, "Store PO Created", "StorePurchaseOrder", f"Created Store PO {order.order_number} for {order.supplier}.", user.name, entity_id=order.id, entity_name=order.order_number, workspace="Store")
     return _order_response(order)
 
 @router.delete("/purchase-orders/{order_id}")
@@ -758,7 +769,9 @@ def delete_order(order_id: int, _: User = Depends(store_admin), db: Session = De
     """Delete the PO without changing independent Items/Stock records."""
     order = db.get(StorePurchaseOrder, order_id)
     if not order: raise HTTPException(status_code=404, detail="Purchase Order not found.")
+    order_number = order.order_number
     db.delete(order); db.commit()
+    log_activity(db, "Store PO Deleted", "StorePurchaseOrder", f"Deleted Store PO {order_number}.", _.name, entity_name=order_number, workspace="Store")
     return {"message": "Purchase Order deleted."}
 
 @router.put("/purchase-orders/{order_id}")
@@ -794,6 +807,7 @@ def update_order(order_id: int, payload: OrderPayload, user: User = Depends(stor
         performed_by=user.name,
     ))
     db.commit(); db.refresh(order)
+    log_activity(db, "Store PO Updated", "StorePurchaseOrder", f"Updated Store PO {order.order_number}.", user.name, entity_id=order.id, entity_name=order.order_number, workspace="Store")
     return _order_response(order)
 
 @router.post("/purchase-orders/{order_id}/complete")
@@ -810,6 +824,7 @@ def complete_order(order_id: int, user: User = Depends(store_admin), db: Session
         performed_by=user.name,
     ))
     db.commit(); db.refresh(order)
+    log_activity(db, "Store PO Completed", "StorePurchaseOrder", f"Store PO {order.order_number} marked as completed.", user.name, entity_id=order.id, entity_name=order.order_number, workspace="Store")
     return _order_response(order)
 
 @router.get("/reports")
@@ -954,6 +969,7 @@ def create_vendor(payload: StoreVendorPayload, db: Session = Depends(get_db), us
     db.add(vendor)
     db.commit()
     db.refresh(vendor)
+    log_activity(db, "Vendor Created", "StoreVendor", f"Created vendor '{vendor.vendor_name}'.", user.name, entity_id=vendor.id, entity_name=vendor.vendor_name, workspace="Store")
     return _serialize_vendor(vendor)
 
 
@@ -978,6 +994,7 @@ def update_vendor(vendor_id: int, payload: StoreVendorPayload, db: Session = Dep
         vendor.status = payload.status
     db.commit()
     db.refresh(vendor)
+    log_activity(db, "Vendor Updated", "StoreVendor", f"Updated vendor '{vendor.vendor_name}'.", user.name, entity_id=vendor.id, entity_name=vendor.vendor_name, workspace="Store")
     return _serialize_vendor(vendor)
 
 
@@ -987,6 +1004,8 @@ def delete_vendor(vendor_id: int, db: Session = Depends(get_db), user: User = De
     vendor = db.get(StoreVendor, vendor_id)
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found.")
+    vendor_name = vendor.vendor_name
     db.delete(vendor)
     db.commit()
+    log_activity(db, "Vendor Deleted", "StoreVendor", f"Deleted vendor '{vendor_name}'.", user.name, entity_name=vendor_name, workspace="Store")
     return {"message": "Vendor deleted successfully."}

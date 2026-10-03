@@ -16,7 +16,8 @@ from app.models.models import (
     Sale, SaleItem, SaleActivity, SaleDispatch, SaleDispatchItem,
     Record, SystemLog, WorkOrder, WOLineItem, WorkOrderSale,
     WorkOrderSaleItem, WorkOrderSaleActivity, WorkOrderSaleDispatch,
-    WorkOrderSaleDispatchItem, CreditNote, CreditNoteItem, UserSession, CompanyAddress
+    WorkOrderSaleDispatchItem, CreditNote, CreditNoteItem, UserSession, CompanyAddress,
+    POApprovalLevel, POApprovalLevelApprover, POApproverPermission,
 )
 
 router = APIRouter(prefix="/api/system", tags=["System"])
@@ -31,6 +32,11 @@ MODELS = [
     Application,
     User,
     ApplicationAccess,
+    # PO Approval tables reference users.id — must come AFTER User for insert
+    # and will be deleted BEFORE User in replace mode (reversed iteration).
+    POApprovalLevel,
+    POApprovalLevelApprover,
+    POApproverPermission,
     CompanyAddress,
     Client,
     Project,
@@ -194,6 +200,9 @@ async def import_database(
             'work_order_sale_dispatch_items': ['dispatch_id', 'item'],
             'credit_notes': ['cn_number'],
             'credit_note_items': ['credit_note_id', 'item', 'credit_qty', 'unit_price'],
+            'po_approval_levels': ['name'],
+            'po_approval_level_approvers': ['level_id', 'user_id'],
+            'po_approver_permissions': ['user_id'],
         }
 
         records_inserted = 0
@@ -201,14 +210,16 @@ async def import_database(
         
         # If replace mode, clear database first in correct dependency order
         if import_type == "replace":
-            # These two tables reference users directly and must be emptied
+            # These tables reference users directly and must be emptied
             # explicitly before the parent users table.  Doing this up front
             # also keeps replace imports compatible with older MODELS lists.
             db.query(ApplicationAccess).delete(synchronize_session=False)
             db.query(UserSession).delete(synchronize_session=False)
+            db.query(POApprovalLevelApprover).delete(synchronize_session=False)
+            db.query(POApproverPermission).delete(synchronize_session=False)
             db.flush()
             for model in reversed(MODELS):
-                if model in (ApplicationAccess, UserSession):
+                if model in (ApplicationAccess, UserSession, POApprovalLevelApprover, POApproverPermission):
                     continue
                 # Older backup files predate the application tables.  Keep the
                 # seeded application catalog in that case; deleting it would

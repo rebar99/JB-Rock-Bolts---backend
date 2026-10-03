@@ -15,8 +15,17 @@ router = APIRouter(prefix="/api/logs", tags=["Logs"])
 
 
 @router.get("", response_model=List[SystemLogOut])
-def list_logs(limit: int = 100, db: Session = Depends(get_db)):
-    return db.query(SystemLog).order_by(SystemLog.created_at.desc()).limit(limit).all()
+def list_logs(limit: int = 100, workspace: Optional[str] = None, db: Session = Depends(get_db)):
+    from app.notifications import _normalize_workspace
+    q = db.query(SystemLog)
+    if workspace:
+        ws = _normalize_workspace(workspace)
+        # Also match legacy rows that have NULL workspace (treat them as Marketing)
+        if ws == "Marketing":
+            q = q.filter((SystemLog.workspace == ws) | (SystemLog.workspace == None))
+        else:
+            q = q.filter(SystemLog.workspace == ws)
+    return q.order_by(SystemLog.created_at.desc()).limit(limit).all()
 
 
 @router.get("/online-users")
