@@ -13,6 +13,7 @@ class SystemLogOut(BaseModel):
     changed_fields: Optional[str] = None
     status: Optional[str] = "Success"
     user: Optional[str] = None
+    workspace: Optional[str] = "Marketing"
     created_at: UTCDatetime
 
     model_config = {"from_attributes": True}

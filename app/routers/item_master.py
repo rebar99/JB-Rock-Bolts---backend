@@ -54,7 +54,7 @@ def create_item(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    _require_master_admin(authorization, db, payload.type)
+    admin_user = _require_master_admin(authorization, db, payload.type)
 
     name = (payload.name or "").strip()
     if not name:
@@ -71,7 +71,9 @@ def create_item(
     db.commit()
     db.refresh(item)
 
-    log_activity(db, f"Item Master Item Added ({payload.type})", Model.__name__, f"Added item '{item.name}' to the Item Master.", payload.created_by or "System", item.id, entity_name=item.name)
+    ws = "Store" if payload.type.upper() == "STORE" else "Marketing"
+    actor = payload.created_by or getattr(admin_user, "name", "System")
+    log_activity(db, f"Item Master Item Added ({payload.type})", Model.__name__, f"Added item '{item.name}' to the Item Master.", actor, item.id, entity_name=item.name, workspace=ws)
     return item
 
 
@@ -82,7 +84,7 @@ def update_item(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    _require_master_admin(authorization, db, payload.type)
+    admin_user = _require_master_admin(authorization, db, payload.type)
 
     Model, _ = _master_models(payload.type)
 
@@ -105,7 +107,9 @@ def update_item(
     db.commit()
     db.refresh(item)
 
-    log_activity(db, f"Item Master Item Updated ({payload.type})", Model.__name__, f"Renamed item '{old_name}' to '{item.name}'.", payload.updated_by or "System", item.id, entity_name=item.name)
+    ws = "Store" if payload.type.upper() == "STORE" else "Marketing"
+    actor = payload.updated_by or getattr(admin_user, "name", "System")
+    log_activity(db, f"Item Master Item Updated ({payload.type})", Model.__name__, f"Renamed item '{old_name}' to '{item.name}'.", actor, item.id, entity_name=item.name, workspace=ws)
     return item
 
 
@@ -117,7 +121,7 @@ def delete_item(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    _require_master_admin(authorization, db, type)
+    admin_user = _require_master_admin(authorization, db, type)
 
     Model, _ = _master_models(type)
 
@@ -129,7 +133,9 @@ def delete_item(
     db.delete(item)
     db.commit()
 
-    log_activity(db, f"Item Master Item Deleted ({type})", Model.__name__, f"Deleted item '{name}' from the Item Master.", deleted_by or "System", entity_name=name)
+    ws = "Store" if type.upper() == "STORE" else "Marketing"
+    actor = deleted_by or getattr(admin_user, "name", "System")
+    log_activity(db, f"Item Master Item Deleted ({type})", Model.__name__, f"Deleted item '{name}' from the Item Master.", actor, entity_name=name, workspace=ws)
     return None
 
 
@@ -147,7 +153,7 @@ def add_item_size(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    _require_master_admin(authorization, db, payload.type)
+    admin_user = _require_master_admin(authorization, db, payload.type)
 
     Model, SizeModel = _master_models(payload.type)
 
@@ -171,7 +177,9 @@ def add_item_size(
     db.commit()
     db.refresh(row)
 
-    log_activity(db, f"Item Master Size Added ({payload.type})", SizeModel.__name__, f"Added size '{size}' to item '{item.name}'.", payload.created_by or "System", row.id, entity_name=f"{item.name} {size}")
+    ws = "Store" if payload.type.upper() == "STORE" else "Marketing"
+    actor = payload.created_by or getattr(admin_user, "name", "System")
+    log_activity(db, f"Item Master Size Added ({payload.type})", SizeModel.__name__, f"Added size '{size}' to item '{item.name}'.", actor, row.id, entity_name=f"{item.name} {size}", workspace=ws)
     return row
 
 
@@ -183,7 +191,7 @@ def update_item_size(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    _require_master_admin(authorization, db, payload.type)
+    admin_user = _require_master_admin(authorization, db, payload.type)
 
     Model, SizeModel = _master_models(payload.type)
 
@@ -212,7 +220,9 @@ def update_item_size(
     db.commit()
     db.refresh(row)
 
-    log_activity(db, f"Item Master Size Updated ({payload.type})", SizeModel.__name__, f"Updated size '{old_size}' to '{size}' for item '{item.name}'.", payload.updated_by or "System", row.id, entity_name=f"{item.name} {size}")
+    ws = "Store" if payload.type.upper() == "STORE" else "Marketing"
+    actor = payload.updated_by or getattr(admin_user, "name", "System")
+    log_activity(db, f"Item Master Size Updated ({payload.type})", SizeModel.__name__, f"Updated size '{old_size}' to '{size}' for item '{item.name}'.", actor, row.id, entity_name=f"{item.name} {size}", workspace=ws)
     return row
 
 
@@ -225,7 +235,7 @@ def delete_item_size(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    _require_master_admin(authorization, db, type)
+    admin_user = _require_master_admin(authorization, db, type)
 
     _, SizeModel = _master_models(type)
 
@@ -237,5 +247,7 @@ def delete_item_size(
     db.delete(row)
     db.commit()
 
-    log_activity(db, f"Item Master Size Deleted ({type})", SizeModel.__name__, f"Deleted size '{label}'.", deleted_by or "System", entity_name=label)
+    ws = "Store" if type.upper() == "STORE" else "Marketing"
+    actor = deleted_by or getattr(admin_user, "name", "System")
+    log_activity(db, f"Item Master Size Deleted ({type})", SizeModel.__name__, f"Deleted size '{label}'.", actor, entity_name=label, workspace=ws)
     return None

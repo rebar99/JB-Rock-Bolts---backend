@@ -509,6 +509,7 @@ def transfer_stock(item_id: int, payload: TransferPayload, user: User = Depends(
         required_for=payload.required_for, location=f"{payload.from_location.strip()} → {payload.to_location.strip()}",
         remarks=payload.remarks, created_by=user.name))
     db.commit(); db.refresh(transfer)
+    log_activity(db, "Stock Transferred", "StoreInventory", f"Transferred {payload.quantity} unit(s) of '{item.name}' from {payload.from_location.strip()} to {payload.to_location.strip()}.", user.name, entity_id=item.id, entity_name=item.name, workspace="Store")
     return {"id": transfer.id, "item_id": item.id, "quantity": transfer.quantity, "from_location": transfer.from_location,
             "to_location": transfer.to_location, "transfer_date": transfer.transfer_date, "message": "Stock transfer recorded."}
 
@@ -518,7 +519,10 @@ def delete_item(item_id: int, _: User = Depends(store_admin), db: Session = Depe
     if not item: raise HTTPException(status_code=404, detail="Item not found.")
     # Delete transfer records first (no cascade on this FK)
     db.query(StorePurchaseStockTransfer).filter(StorePurchaseStockTransfer.item_id == item_id).delete(synchronize_session=False)
-    db.delete(item); db.commit(); return {"message": "Item deleted."}
+    item_name = item.name
+    db.delete(item); db.commit()
+    log_activity(db, "Inventory Deleted", "StoreInventory", f"Deleted inventory item '{item_name}'.", _.name, entity_id=item_id, entity_name=item_name, workspace="Store")
+    return {"message": "Item deleted."}
 
 @router.get("/purchase-orders")
 def orders(_: User = Depends(store_user), db: Session = Depends(get_db)):
@@ -589,6 +593,7 @@ def patch_material_receipt_payment(receipt_id: int, payload: MaterialReceiptPaym
     receipt.updated_by = user.name
     receipt.updated_at = datetime.utcnow()
     db.commit(); db.refresh(receipt)
+    log_activity(db, "Payment Status Updated", "StorePurchaseOrder", f"Updated payment status to '{payload.payment_status}' (amount: ₹{payload.amount_paid:,.2f}) for receipt #{receipt.id}.", user.name, entity_id=receipt.id, workspace="Store")
     return _material_receipt_response(receipt)
 
 

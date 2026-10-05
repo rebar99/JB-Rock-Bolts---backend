@@ -260,7 +260,7 @@ def create_credit_note(
         entity_id=cn.id,
         entity_name=cn_number,
         details=f"Reason: {cn.reason} | Amount: {cn.total_amount}",
-        user=payload.created_by,
+        user=payload.created_by or current_user.name,
     )
     return _load_cn(cn.id, db)
 
@@ -428,6 +428,15 @@ def update_credit_note(
                 recalc_wo_completed_quantities(db, wo)
                 db.commit()
 
+        log_activity(
+        db,
+        action="Credit Note Updated",
+        entity_type="CreditNote",
+        entity_id=cn.id,
+        entity_name=clean_cn_no,
+        details=f"Updated Credit Note {clean_cn_no}. Amount: {cn.total_amount}",
+        user=current_user.name,
+    )
     return _load_cn(cn_id, db)
 
 
@@ -453,7 +462,7 @@ def cancel_credit_note(
 
     cn.is_deleted = True
     cn.deleted_at = datetime.utcnow()
-    cn.deleted_by = current_user.username if hasattr(current_user, "username") else str(current_user.id)
+    cn.deleted_by = current_user.name or current_user.email
     cn.permanent_delete_at = cn.deleted_at + timedelta(hours=24)
     cn.status = "Cancelled"
     db.commit()
@@ -488,5 +497,14 @@ def cancel_credit_note(
                 recalc_wo_completed_quantities(db, wo)
                 db.commit()
 
+    log_activity(
+        db,
+        action="Credit Note Cancelled",
+        entity_type="CreditNote",
+        entity_id=cn.id,
+        entity_name=cn.cn_number,
+        details=f"Cancelled Credit Note {cn.cn_number} and moved to Recently Deleted.",
+        user=current_user.name,
+    )
     return {"detail": f"Credit Note {cn.cn_number} moved to Recently Deleted"}
 

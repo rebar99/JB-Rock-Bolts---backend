@@ -5,6 +5,7 @@ from app.database import get_db
 from app.models.models import StoreUOMOption, UOMOption, User
 from app.schemas.uom import UOMOptionCreate, UOMOptionUpdate, UOMOptionOut
 from app.utils.auth import require_admin
+from app.utils.helpers import log_activity
 from fastapi import Header
 
 router = APIRouter(prefix="/api/uom", tags=["UOM"])
@@ -41,6 +42,9 @@ def create_uom(
     db.add(new_uom)
     db.commit()
     db.refresh(new_uom)
+    ws = "Store" if type.upper() == "STORE" else "Marketing"
+    actor = getattr(current_user, "name", None) or current_user.email
+    log_activity(db, f"UOM Created ({type})", Model.__name__, f"Created UOM option '{new_uom.name}'.", actor, new_uom.id, entity_name=new_uom.name, workspace=ws)
     return new_uom
 
 
@@ -70,6 +74,9 @@ def update_uom(
 
     db.commit()
     db.refresh(uom)
+    ws = "Store" if type.upper() == "STORE" else "Marketing"
+    actor = getattr(current_user, "name", None) or current_user.email
+    log_activity(db, f"UOM Updated ({type})", Model.__name__, f"Updated UOM option to '{uom.name}'.", actor, uom.id, entity_name=uom.name, workspace=ws)
     return uom
 
 
@@ -87,5 +94,9 @@ def delete_uom(
     if not uom:
         raise HTTPException(status_code=404, detail="UOM option not found")
 
+    name = uom.name
     db.delete(uom)
     db.commit()
+    ws = "Store" if type.upper() == "STORE" else "Marketing"
+    actor = getattr(current_user, "name", None) or current_user.email
+    log_activity(db, f"UOM Deleted ({type})", Model.__name__, f"Deleted UOM option '{name}'.", actor, uom_id, entity_name=name, workspace=ws)

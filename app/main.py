@@ -229,6 +229,7 @@ async def lifespan(app: FastAPI):
                 ("entity_name", "VARCHAR(300) NULL"),
                 ("changed_fields", "TEXT NULL"),
                 ("status", "VARCHAR(50) NULL DEFAULT 'Success'"),
+                ("workspace", "VARCHAR(50) NULL DEFAULT 'Marketing'"),
             ]:
                 try:
                     conn.execute(text(f"SELECT {col} FROM system_logs LIMIT 1"))
@@ -237,6 +238,11 @@ async def lifespan(app: FastAPI):
                         conn.execute(text(f"ALTER TABLE system_logs ADD COLUMN {col} {dtype}"))
                     except Exception:
                         pass
+
+            try:
+                conn.execute(text("UPDATE system_logs SET workspace = 'Marketing' WHERE workspace IS NULL OR workspace = ''"))
+            except Exception:
+                pass
 
             # Existing users predate the approval workflow — grandfather them in as active
             try:
@@ -691,12 +697,22 @@ async def enforce_marketing_application_access(request, call_next):
     security control for the legacy Marketing endpoints.
     """
     path = request.url.path
+    query_string = request.url.query.lower()
+    is_store_request = (
+        path.startswith("/api/store-purchase")
+        or (path.startswith("/api/uom") and "type=store" in query_string)
+        or (path.startswith("/api/item-master") and "type=store" in query_string)
+    )
+    is_shared_request = (
+        path.startswith("/api/logs")
+        or path.startswith("/api/company-addresses")
+    )
     public_or_non_marketing = (
         not path.startswith("/api/")
         or path.startswith("/api/users/")
         or path == "/api/users"
         or path.startswith("/api/application-access")
-        or path.startswith("/api/store-purchase")
+        or is_store_request
         or request.method == "OPTIONS"
     )
     if public_or_non_marketing:
@@ -714,10 +730,11 @@ async def enforce_marketing_application_access(request, call_next):
         user = db.get(User, user_id)
         if not user or not user.is_active:
             return JSONResponse(status_code=401, content={"detail": "User not found or inactive."})
-        try:
-            require_application_access(user, db, "marketing")
-        except Exception as exc:
-            return JSONResponse(status_code=403, content={"detail": getattr(exc, "detail", "No Marketing access.")})
+        if not is_shared_request:
+            try:
+                require_application_access(user, db, "marketing")
+            except Exception as exc:
+                return JSONResponse(status_code=403, content={"detail": getattr(exc, "detail", "No Marketing access.")})
     finally:
         db.close()
     return await call_next(request)
