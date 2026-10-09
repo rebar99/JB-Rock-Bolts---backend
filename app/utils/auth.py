@@ -112,7 +112,7 @@ def get_current_user_from_token(
     return user
 
 
-def require_admin(authorization: str, db: Session, detail: str = "Admin access required.") -> User:
+def require_admin(authorization: str, db: Session, detail: str = "Admin access required.", app_code: str = "marketing") -> User:
     if not authorization:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token.")
     user_id = get_user_id_from_token(authorization)
@@ -121,7 +121,7 @@ def require_admin(authorization: str, db: Session, detail: str = "Admin access r
     user = db.get(User, user_id)
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
-    if application_role(user, db, "marketing") != "admin":
+    if application_role(user, db, app_code) != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
     return user
 
@@ -156,3 +156,4 @@ def require_admin_for_write(
             detail="You do not have permission to perform this action. Read-only access only.",
         )
     return user
+

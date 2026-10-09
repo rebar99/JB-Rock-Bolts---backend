@@ -28,7 +28,8 @@ def create_uom(
     db: Session = Depends(get_db),
     authorization: str = Header(default=None)
 ):
-    current_user = require_admin(authorization, db, "Only admins can manage UOM options")
+    app_code = "store_purchase" if type.upper() == "STORE" else "marketing"
+    current_user = require_admin(authorization, db, "Only admins can manage UOM options", app_code)
         
     Model = _uom_model(type)
     existing = db.query(Model).filter(Model.name.ilike(payload.name)).first()
@@ -56,7 +57,8 @@ def update_uom(
     db: Session = Depends(get_db),
     authorization: str = Header(default=None)
 ):
-    current_user = require_admin(authorization, db, "Only admins can manage UOM options")
+    app_code = "store_purchase" if type.upper() == "STORE" else "marketing"
+    current_user = require_admin(authorization, db, "Only admins can manage UOM options", app_code)
         
     Model = _uom_model(type)
     uom = db.query(Model).filter(Model.id == uom_id).first()
@@ -87,7 +89,8 @@ def delete_uom(
     db: Session = Depends(get_db),
     authorization: str = Header(default=None)
 ):
-    require_admin(authorization, db, "Only admins can manage UOM options")
+    app_code = "store_purchase" if type.upper() == "STORE" else "marketing"
+    current_user = require_admin(authorization, db, "Only admins can manage UOM options", app_code)
 
     Model = _uom_model(type)
     uom = db.query(Model).filter(Model.id == uom_id).first()
@@ -100,3 +103,8 @@ def delete_uom(
     ws = "Store" if type.upper() == "STORE" else "Marketing"
     actor = getattr(current_user, "name", None) or current_user.email
     log_activity(db, f"UOM Deleted ({type})", Model.__name__, f"Deleted UOM option '{name}'.", actor, uom_id, entity_name=name, workspace=ws)
+
+
+
+
+

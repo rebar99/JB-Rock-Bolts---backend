@@ -420,7 +420,14 @@ def update_item(item_id: int, payload: ItemPayload, _: User = Depends(store_admi
     duplicate = _same_inventory_item(db, payload.name, payload.stock_item)
     if duplicate and duplicate.id != item_id:
         raise HTTPException(status_code=409, detail="This Group Name and Items Name combination already exists.")
-    for key, value in payload.model_dump(exclude={"quantity", "previous_quantity"}).items(): setattr(item, key, value)
+    
+    for key, value in payload.model_dump(exclude={"quantity", "previous_quantity", "current_month_quantity"}).items(): setattr(item, key, value)
+    
+    item.previous_quantity = payload.previous_quantity
+    item.current_month_quantity = payload.current_month_quantity
+    item.total_received_quantity = payload.quantity
+    item.quantity = payload.quantity - (item.issued_quantity or 0)
+    
     item.status = _status(item.quantity, item.reorder_level)
     db.commit(); db.refresh(item)
     log_activity(db, "Inventory Updated", "StoreInventory", f"Updated inventory item '{item.name}'.", _.name, entity_id=item.id, entity_name=item.name, workspace="Store")
