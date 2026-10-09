@@ -222,6 +222,8 @@ class OrderPayload(BaseModel):
     payment_terms: str | None = None
     quantity_variance: str | None = None
     notes: str | None = None
+    remark_1: str | None = None
+    remark_2: str | None = None
     items: list[OrderLinePayload] = Field(min_length=1)
     status: str = "Pending Approval"
 
@@ -885,6 +887,8 @@ def _order_response(order: StorePurchaseOrder):
         "payment_terms": detail.payment_terms if detail else None,
         "quantity_variance": detail.quantity_variance if detail else None,
         "notes": detail.notes if detail else None,
+        "remark_1": detail.remark_1 if detail else None,
+        "remark_2": detail.remark_2 if detail else None,
         "items": [{"id": line.id, "line_number": line.line_number, "item_description": line.item_description,
                     "quantity": line.quantity, "uom": line.uom, "unit_rate": line.unit_rate, "amount": line.amount}
                    for line in order.line_items],
@@ -1021,3 +1025,6 @@ def delete_vendor(vendor_id: int, db: Session = Depends(get_db), user: User = De
     db.commit()
     log_activity(db, "Vendor Deleted", "StoreVendor", f"Deleted vendor '{vendor_name}'.", user.name, entity_name=vendor_name, workspace="Store")
     return {"message": "Vendor deleted successfully."}
+
+
+

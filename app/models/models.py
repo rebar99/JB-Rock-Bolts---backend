@@ -276,6 +276,8 @@ class StorePurchaseOrderDetail(Base):
     payment_terms = Column(String(300), nullable=True)
     quantity_variance = Column(String(300), nullable=True)
     notes = Column(Text, nullable=True)
+    remark_1 = Column(Text, nullable=True)
+    remark_2 = Column(Text, nullable=True)
 
     order = relationship("StorePurchaseOrder", back_populates="details")
 
@@ -1300,3 +1302,4 @@ class StoreVendor(Base):
     status = Column(String(50), nullable=False, default="Active")
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
