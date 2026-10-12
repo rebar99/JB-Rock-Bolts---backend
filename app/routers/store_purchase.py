@@ -3,7 +3,7 @@ from datetime import date, datetime
 import re
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 from sqlalchemy import func
 from app.database import get_db
 from app.models.models import StoreVendor, StorePurchaseItem, StorePurchaseStockItem, StorePurchaseOrder, StorePurchaseOrderActivity, StorePurchaseOrderDetail, StorePurchaseOrderLine, StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine, StorePurchaseStockTransaction, StorePurchaseStockTransfer, StorePOItemMasterItem, User, POApprovalLevel, POApprovalLevelApprover, StorePurchaseOrderApproval
@@ -847,6 +847,7 @@ def reports(_: User = Depends(store_user), db: Session = Depends(get_db)):
 
 
 def _order_response(order: StorePurchaseOrder):
+    session = object_session(order)
     detail = order.details
     received_quantity = sum(
         float(line.received_quantity or 0)
@@ -890,6 +891,8 @@ def _order_response(order: StorePurchaseOrder):
         "remark_1": detail.remark_1 if detail else None,
         "remark_2": detail.remark_2 if detail else None,
         "items": [{"id": line.id, "line_number": line.line_number, "item_description": line.item_description,
+                    "item_name": (_inventory_group_and_item(session, line.item_description)[1] if session and _inventory_group_and_item(session, line.item_description)[1] != "General" else line.item_description),
+                    "group_name": (_inventory_group_and_item(session, line.item_description)[0] if session else None),
                     "quantity": line.quantity, "uom": line.uom, "unit_rate": line.unit_rate, "amount": line.amount}
                    for line in order.line_items],
     }
