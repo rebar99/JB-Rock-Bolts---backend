@@ -391,8 +391,9 @@ def recalc_po_delivered_quantities(db: Session, po) -> None:
         po.delivered_quantity = round(max(0, float(total) - abs(float(cn_total))), 10)
         return
 
-    # Only count non-deleted sales
-    po_sale_ids = [s.id for s in po.sales if not getattr(s, 'is_deleted', False)]
+    # Only count non-deleted sales (query DB directly so uncommitted flushed sales in current transaction are included)
+    po_sale_rows = db.query(Sale.id).filter(Sale.po_id == po.id, Sale.is_deleted == False).all()
+    po_sale_ids = [r[0] for r in po_sale_rows]
 
     # Pre-compute credited qty per item name for this PO's credit notes
     cn_by_item: dict[str, float] = {}
@@ -428,9 +429,9 @@ def recalc_po_delivered_quantities(db: Session, po) -> None:
                 SaleItem.item.ilike(li.item),
             ).scalar() or 0
         credited = cn_by_item.get(li.item, 0.0)
-        li.delivered_quantity = round(max(0, float(by_id) + float(by_name) - credited), 10)
+        li.delivered_quantity = round(max(0, float(by_id) + float(by_name) - credited), 2)
         total_all += li.delivered_quantity
-    po.delivered_quantity = round(max(0, total_all), 10)
+    po.delivered_quantity = round(max(0, total_all), 2)
 
 
 def recalc_wo_completed_quantities(db: Session, wo) -> None:

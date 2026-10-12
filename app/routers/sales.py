@@ -411,8 +411,9 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db), current_user
         db.add(sale_item)
 
         if not item_data.line_item_id:
+            item_norm = " ".join((item_data.item or "").lower().split())
             matching_li = next(
-                (l for l in po.line_items if l.item.lower().strip() == item_data.item.lower().strip()),
+                (l for l in po.line_items if " ".join((l.item or "").lower().split()) == item_norm),
                 None
             )
             if matching_li:
@@ -422,18 +423,28 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db), current_user
     recalc_po_delivered_quantities(db, po)
 
     # Only validate line items that are part of THIS dispatch — not every
-    # item on the PO.  Blocking a valid 16 mm dispatch just because 20 mm
-    # was over-dispatched in a previous (already-saved) sale is wrong.
+    # item on the PO.
     dispatched_li_ids = {si.line_item_id for si in sale.items if si.line_item_id}
+    for item_data in payload.items:
+        if item_data.line_item_id:
+            dispatched_li_ids.add(item_data.line_item_id)
+        else:
+            item_norm = " ".join((item_data.item or "").lower().split())
+            match = next((l for l in po.line_items if " ".join((l.item or "").lower().split()) == item_norm), None)
+            if match:
+                dispatched_li_ids.add(match.id)
+
     if po.line_items:
         for li in po.line_items:
             if li.id not in dispatched_li_ids:
                 continue  # skip items not in this dispatch
-            if float(li.delivered_quantity or 0) > float(li.quantity or 0):
+            deliv_qty = round(float(li.delivered_quantity or 0), 2)
+            ord_qty = round(float(li.quantity or 0), 2)
+            if deliv_qty > ord_qty:
                 db.rollback()
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Cannot dispatch more than PO quantity. Item '{li.item}' has {float(li.quantity or 0):.2f} ordered but total dispatch would be {float(li.delivered_quantity or 0):.2f}."
+                    detail=f"Cannot dispatch more than PO quantity. Item '{li.item}' has {ord_qty:.2f} ordered but total dispatch would be {deliv_qty:.2f}."
                 )
 
     activity = SaleActivity(
