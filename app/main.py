@@ -517,6 +517,16 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         pass
 
+            # Add remark_1 and remark_2 to store_purchase_order_details
+            for col, dtype in [("remark_1", "TEXT NULL"), ("remark_2", "TEXT NULL")]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM store_purchase_order_details LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE store_purchase_order_details ADD COLUMN {col} {dtype}"))
+                    except Exception:
+                        pass
+
     except Exception as e:
         logger.error(f"Error applying schema updates: {e}")
 
