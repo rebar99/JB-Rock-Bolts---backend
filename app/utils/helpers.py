@@ -517,6 +517,7 @@ def log_activity(
     from app.models.models import SystemLog
     from app import notifications
     try:
+        normalized_workspace = notifications._normalize_workspace(workspace or "Marketing")
         log_entry = SystemLog(
             action=action,
             entity_type=entity_type,
@@ -526,7 +527,7 @@ def log_activity(
             changed_fields=changed_fields,
             status=status,
             user=user,
-            workspace=workspace,
+            workspace=normalized_workspace,
         )
         db.add(log_entry)
         db.commit()

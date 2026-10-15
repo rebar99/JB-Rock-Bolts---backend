@@ -287,11 +287,31 @@ async def login(payload: UserLogin, db: Session = Depends(get_db)):
     db.add(session)
     db.commit()
 
+    # Determine workspace for login log
+    from app.routers.application_access import access_map
+    from app.notifications import _normalize_workspace
+
+    access = access_map(user)
+    has_marketing = access.get("marketing") not in (None, "none")
+    has_store = access.get("store_purchase") not in (None, "none")
+
+    ws = payload.workspace
+    if not ws:
+        if has_store and not has_marketing:
+            ws = "Store"
+        elif has_marketing and not has_store:
+            ws = "Marketing"
+        else:
+            ws = "Software Selection"
+    else:
+        ws = _normalize_workspace(ws)
+
     log_activity(
         db, "User Logged In", "User",
         f"User {user.name} logged in.",
         user.name, user.id,
         entity_name=user.name,
+        workspace=ws,
     )
     return Token(access_token=token, user=serialize_user(user))
 
@@ -353,7 +373,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 @router.post("/logout")
-def logout(authorization: str = Header(default=None), db: Session = Depends(get_db)):
+def logout(
+    workspace: Optional[str] = None,
+    authorization: str = Header(default=None),
+    db: Session = Depends(get_db),
+):
     if not authorization:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token.")
 
@@ -378,6 +402,23 @@ def logout(authorization: str = Header(default=None), db: Session = Depends(get_
         db.commit()
 
     from app import notifications
+    from app.routers.application_access import access_map
+
+    ws = workspace
+    if not ws:
+        ws = notifications._online_users.get(user_id, {}).get("workspace")
+    if not ws:
+        access = access_map(user)
+        has_marketing = access.get("marketing") not in (None, "none")
+        has_store = access.get("store_purchase") not in (None, "none")
+        if has_store and not has_marketing:
+            ws = "Store"
+        elif has_marketing and not has_store:
+            ws = "Marketing"
+        else:
+            ws = "Software Selection"
+    ws = notifications._normalize_workspace(ws or "Marketing")
+
     notifications.remove_user(user_id)
 
     log_activity(
@@ -385,6 +426,7 @@ def logout(authorization: str = Header(default=None), db: Session = Depends(get_
         f"User {user.name} logged out.",
         user.name, user.id,
         entity_name=user.name,
+        workspace=ws,
     )
     return {"message": "Logged out successfully."}
 
@@ -392,6 +434,7 @@ def logout(authorization: str = Header(default=None), db: Session = Depends(get_
 @router.post("/{user_id}/force-logout")
 async def force_logout_user(
     user_id: int,
+    workspace: Optional[str] = None,
     db: Session = Depends(get_db),
     admin: User = Depends(require_super_admin),
 ):
@@ -412,6 +455,23 @@ async def force_logout_user(
     db.commit()
 
     from app import notifications
+    from app.routers.application_access import access_map
+
+    ws = workspace
+    if not ws:
+        ws = notifications._online_users.get(user_id, {}).get("workspace")
+    if not ws:
+        access = access_map(user)
+        has_marketing = access.get("marketing") not in (None, "none")
+        has_store = access.get("store_purchase") not in (None, "none")
+        if has_store and not has_marketing:
+            ws = "Store"
+        elif has_marketing and not has_store:
+            ws = "Marketing"
+        else:
+            ws = "Software Selection"
+    ws = notifications._normalize_workspace(ws or "Marketing")
+
     notifications.remove_user(user_id)
 
     # Terminate active websocket connections for this user
@@ -425,6 +485,7 @@ async def force_logout_user(
         f"User {user.name} was forcefully logged out by {admin.name}.",
         admin.name, user.id,
         entity_name=user.name,
+        workspace=ws,
     )
     return {"message": f"User {user.name} has been logged out."}
 
@@ -483,42 +544,78 @@ def active_sessions(db: Session = Depends(get_db), _: User = Depends(require_sup
 
 
 @router.get("/recent-logins", response_model=List[UserSessionOut])
-def recent_logins(db: Session = Depends(get_db), _: User = Depends(require_super_admin)):
+def recent_logins(
+    workspace: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_super_admin),
+):
     """Returns the most recent login per user (up to 20 users), newest first.
+
+    When `workspace` is supplied the list is filtered to users who have logged
+    in from that workspace (based on system_logs).  Users who have access to
+    BOTH workspaces (e.g. Super Admin / Deepika) appear in BOTH lists.
 
     Online status is sourced from the live SSE connection list (notifications
     module) — not from the DB is_active flag — so a backend restart never
     causes an actively-connected user to appear as Offline in the History tab.
     """
     from app import notifications as notif
+    from app.models.models import SystemLog
+    from app.notifications import _normalize_workspace
 
-    # user_ids who currently have the app open (live SSE connection)
-    live_user_ids = {u["user_id"] for u in notif.get_online_users()}
+    # Normalise the requested workspace filter
+    filter_ws = _normalize_workspace(workspace) if workspace else None
+
+    # Which users are currently live in this workspace via SSE?
+    live_user_ids = {
+        u["user_id"]
+        for u in notif.get_online_users()
+        if not filter_ws or _normalize_workspace(u.get("workspace")) == filter_ws
+    }
+
+    # Fetch all users to inspect permissions
+    from app.routers.application_access import access_map
+    all_users = {u.id: u for u in db.query(User).all()}
 
     all_sessions = (
         db.query(UserSession)
         .order_by(UserSession.login_at.desc())
-        .limit(100)
+        .limit(200)
         .all()
     )
 
-    # Sync DB sessions with live status:
-    # mark active if SSE is live, mark inactive if SSE is gone
-    for s in all_sessions:
-        if s.user_id in live_user_ids:
-            s.is_active = True
-        # Don't flip to False here — keep DB state for users not in SSE
-        # (they may have just briefly disconnected)
-
-    # Keep only the most recent session per user
+    # Keep only the most recent session per user, filtered by workspace
     seen_users: set[int] = set()
     deduped = []
     for s in all_sessions:
         if s.user_id in seen_users:
             continue
+
+        u = all_users.get(s.user_id)
+        if not u:
+            continue
+
+        # Check user's application permissions
+        acc = access_map(u)
+        has_marketing = bool(u.is_super_admin or acc.get("marketing") not in (None, "none"))
+        has_store = bool(u.is_super_admin or acc.get("store_purchase") not in (None, "none"))
+
+        # Filter by requested workspace:
+        # Users with both access appear in BOTH tabs.
+        # Single-workspace users appear only in their respective workspace.
+        if filter_ws == "Store":
+            if not has_store:
+                continue
+        elif filter_ws == "Marketing":
+            if not has_marketing:
+                continue
+
         seen_users.add(s.user_id)
-        # Use live SSE status as the definitive online indicator
+
+        # Use live SSE status in this workspace as the definitive online indicator
         s.is_active = s.user_id in live_user_ids
+        setattr(s, "workspace", filter_ws or "Marketing")
+
         deduped.append(s)
         if len(deduped) >= 20:
             break

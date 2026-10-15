@@ -31,6 +31,7 @@ class UserOut(BaseModel):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+    workspace: Optional[str] = None
 
 
 class PasswordResetRequest(BaseModel):
@@ -65,5 +66,7 @@ class UserSessionOut(BaseModel):
     login_at: UTCDatetime
     logout_at: Optional[OptUTCDatetime] = None
     is_active: bool
+    # Workspace derived from system_logs — not stored in the sessions table itself
+    workspace: Optional[str] = None
 
     model_config = {"from_attributes": True}
