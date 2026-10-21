@@ -175,6 +175,13 @@ class StorePurchaseOrder(Base):
     po_type = Column(String(30), nullable=False, default="Regular Vendor PO", server_default="Regular Vendor PO")
     created_at = Column(DateTime, server_default=func.now())
     created_by = Column(String(100), nullable=True)
+
+    # Soft-delete fields
+    is_deleted = Column(Boolean, default=False, nullable=False, server_default="0")
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_by = Column(String(100), nullable=True)
+    permanent_delete_at = Column(DateTime, nullable=True)
+
     details = relationship("StorePurchaseOrderDetail", back_populates="order", uselist=False, cascade="all, delete-orphan")
     line_items = relationship("StorePurchaseOrderLine", back_populates="order", cascade="all, delete-orphan", order_by="StorePurchaseOrderLine.line_number")
     material_receipts = relationship("StorePurchaseMaterialReceipt", back_populates="order", cascade="all, delete-orphan")

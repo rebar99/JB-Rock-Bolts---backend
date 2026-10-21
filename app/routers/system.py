@@ -18,6 +18,11 @@ from app.models.models import (
     WorkOrderSaleItem, WorkOrderSaleActivity, WorkOrderSaleDispatch,
     WorkOrderSaleDispatchItem, CreditNote, CreditNoteItem, UserSession, CompanyAddress,
     POApprovalLevel, POApprovalLevelApprover, POApproverPermission,
+    StoreVendor, StorePOItemMasterItem, StorePOItemMasterSize, StoreUOMOption,
+    StorePurchaseItem, StorePurchaseStockItem, StorePurchaseStockTransaction,
+    StorePurchaseStockTransfer, StorePurchaseOrder, StorePurchaseOrderDetail,
+    StorePurchaseOrderLine, StorePurchaseOrderApproval, StorePurchaseOrderActivity,
+    StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine
 )
 
 router = APIRouter(prefix="/api/system", tags=["System"])
@@ -25,18 +30,25 @@ router = APIRouter(prefix="/api/system", tags=["System"])
 # List of all models in dependency order (parents first for insert, children first for delete)
 # Note: For export, order doesn't matter much. For import, we use SET FOREIGN_KEY_CHECKS=0 
 # but it's good practice to have them ordered.
-MODELS = [
-    # Applications must be exported/imported before their access rows.  Keeping
-    # access rows in this list also makes replace mode clear them before users,
-    # avoiding the users -> application_access foreign-key violation.
-    Application,
-    User,
-    ApplicationAccess,
-    # PO Approval tables reference users.id — must come AFTER User for insert
-    # and will be deleted BEFORE User in replace mode (reversed iteration).
-    POApprovalLevel,
-    POApprovalLevelApprover,
-    POApproverPermission,
+STORE_MODELS = [
+    StoreVendor,
+    StoreUOMOption,
+    StorePOItemMasterItem,
+    StorePOItemMasterSize,
+    StorePurchaseItem,
+    StorePurchaseStockItem,
+    StorePurchaseOrder,
+    StorePurchaseOrderDetail,
+    StorePurchaseOrderLine,
+    StorePurchaseOrderApproval,
+    StorePurchaseOrderActivity,
+    StorePurchaseMaterialReceipt,
+    StorePurchaseMaterialReceiptLine,
+    StorePurchaseStockTransaction,
+    StorePurchaseStockTransfer,
+]
+
+MARKETING_MODELS = [
     CompanyAddress,
     Client,
     Project,
@@ -60,12 +72,20 @@ MODELS = [
     WorkOrderSaleActivity,
     WorkOrderSaleDispatch,
     WorkOrderSaleDispatchItem,
-    # Credit-note rows depend on PO/WO sales. Keep them after both sale
-    # sources so restore inserts parents first; reversed delete order then
-    # removes credit notes before their linked sales.
     CreditNote,
     CreditNoteItem,
+    POApprovalLevel,
+    POApprovalLevelApprover,
+    POApproverPermission,
     Record,
+]
+
+MODELS = [
+    Application,
+    User,
+    ApplicationAccess,
+    *MARKETING_MODELS,
+    *STORE_MODELS,
     SystemLog,
     UserSession
 ]
@@ -82,16 +102,35 @@ class JSONEncoder(json.JSONEncoder):
         return super().default(obj)
 
 @router.get("/backup/export")
-def export_database(db: Session = Depends(get_db)):
+def export_database(
+    scope: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
     """
-    Export the complete database to a JSON structure.
-    Returns all records for all models.
+    Export database records to a JSON structure filtered by scope.
+    scope: 'store' | 'marketing' | 'all'
     """
-    backup_data = {}
-    for model in MODELS:
+    scope_val = (scope or "all").strip().lower()
+    if scope_val == "store":
+        selected_models = STORE_MODELS
+        prefix = "store_backup"
+    elif scope_val == "marketing":
+        selected_models = MARKETING_MODELS
+        prefix = "marketing_backup"
+    else:
+        selected_models = MODELS
+        prefix = "database_backup"
+
+    backup_data = {
+        "__metadata__": {
+            "scope": scope_val,
+            "exported_at": datetime.datetime.utcnow().isoformat(),
+            "version": "2.0"
+        }
+    }
+    for model in selected_models:
         table_name = model.__tablename__
         records = db.query(model).all()
-        # Convert to dict, removing SQLAlchemy internal state
         serialized_records = []
         for r in records:
             r_dict = {}
@@ -103,7 +142,7 @@ def export_database(db: Session = Depends(get_db)):
     from fastapi import Response
     json_str = json.dumps(backup_data, cls=JSONEncoder)
     
-    filename = f"database_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    filename = f"{prefix}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     
     return Response(
         content=json_str,
@@ -117,6 +156,7 @@ import os
 async def import_database(
     file: UploadFile = File(...),
     import_type: str = Form("merge"),
+    scope: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     """
@@ -155,14 +195,18 @@ async def import_database(
 
         # 2. Parse Dates for the imported data
         for table_name, records in backup_data.items():
+            if table_name.startswith("__") or not isinstance(records, list):
+                continue
             for record in records:
+                if not isinstance(record, dict):
+                    continue
                 for key, value in record.items():
                     if isinstance(value, str):
                         try:
                             if len(value) == 10 and value.count("-") == 2:
                                 record[key] = datetime.datetime.strptime(value, "%Y-%m-%d").date()
-                            elif "T" in value and (len(value) == 19 or "." in value):
-                                record[key] = datetime.datetime.fromisoformat(value)
+                            elif "T" in value and (len(value) >= 19 or "." in value):
+                                record[key] = datetime.datetime.fromisoformat(value.replace("Z", "+00:00") if value.endswith("Z") else value)
                         except (ValueError, TypeError):
                             pass
 
@@ -203,44 +247,87 @@ async def import_database(
             'po_approval_levels': ['name'],
             'po_approval_level_approvers': ['level_id', 'user_id'],
             'po_approver_permissions': ['user_id'],
+            'store_vendors': ['vendor_name'],
+            'store_po_item_master': ['name'],
+            'store_po_item_master_sizes': ['item_id', 'size'],
+            'store_uom_options': ['name'],
+            'store_purchase_items': ['name'],
+            'store_purchase_stock_items': ['material_id', 'name'],
+            'store_purchase_orders': ['order_number'],
+            'store_purchase_order_details': ['order_id'],
+            'store_purchase_order_lines': ['order_id', 'line_number'],
+            'store_purchase_order_approvals': ['order_id', 'level_id', 'approver_id'],
+            'store_purchase_order_activities': ['order_id', 'action', 'created_at'],
+            'store_purchase_material_receipts': ['order_id', 'invoice_number'],
+            'store_purchase_material_receipt_lines': ['receipt_id', 'line_number'],
+            'store_purchase_stock_transactions': ['receipt_line_id'],
+            'store_purchase_stock_transfers': ['item_id', 'quantity', 'from_location', 'to_location', 'transfer_date'],
         }
 
         records_inserted = 0
         records_skipped = 0
         
-        # If replace mode, clear database first in correct dependency order
+        # Detect scope (from form or metadata or content)
+        file_scope = backup_data.get("__metadata__", {}).get("scope")
+        effective_scope = (scope or file_scope or "").strip().lower()
+        if not effective_scope:
+            # Auto-detect from tables in backup
+            has_store = any(m.__tablename__ in backup_data for m in STORE_MODELS)
+            has_marketing = any(m.__tablename__ in backup_data for m in MARKETING_MODELS)
+            if has_store and not has_marketing:
+                effective_scope = "store"
+            elif has_marketing and not has_store:
+                effective_scope = "marketing"
+            else:
+                effective_scope = "all"
+
+        if effective_scope == "store":
+            selected_models = STORE_MODELS
+        elif effective_scope == "marketing":
+            selected_models = MARKETING_MODELS
+        else:
+            selected_models = MODELS
+
+        # Temporarily disable foreign key checks for clean bulk replacement/merging
+        try:
+            db.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
+        except Exception:
+            pass
+
+        # If replace mode, clear database first in correct dependency order for the scoped models
         if import_type == "replace":
-            # These tables reference users directly and must be emptied
-            # explicitly before the parent users table.  Doing this up front
-            # also keeps replace imports compatible with older MODELS lists.
-            db.query(ApplicationAccess).delete(synchronize_session=False)
-            db.query(UserSession).delete(synchronize_session=False)
-            db.query(POApprovalLevelApprover).delete(synchronize_session=False)
-            db.query(POApproverPermission).delete(synchronize_session=False)
-            db.flush()
-            for model in reversed(MODELS):
-                if model in (ApplicationAccess, UserSession, POApprovalLevelApprover, POApproverPermission):
-                    continue
-                # Older backup files predate the application tables.  Keep the
-                # seeded application catalog in that case; deleting it would
-                # leave a restored database without Marketing/Store apps.
-                if model.__tablename__ == "applications" and "applications" not in backup_data:
-                    continue
-                db.query(model).delete()
-            db.commit()
+            if effective_scope == "store":
+                # Only clear Store tables - Marketing & Users remain 100% untouched!
+                for model in reversed(STORE_MODELS):
+                    db.query(model).delete(synchronize_session=False)
+                db.commit()
+            elif effective_scope == "marketing":
+                # Only clear Marketing tables - Store & Users remain 100% untouched!
+                for model in reversed(MARKETING_MODELS):
+                    db.query(model).delete(synchronize_session=False)
+                db.commit()
+            else:
+                for model in reversed(MODELS):
+                    if model in (ApplicationAccess, UserSession):
+                        continue
+                    if model.__tablename__ == "applications" and "applications" not in backup_data:
+                        continue
+                    db.query(model).delete(synchronize_session=False)
+                db.commit()
             
         # Track IDs of newly inserted records so their children bypass deduplication
-        inserted_parent_ids = {model.__tablename__: set() for model in MODELS}
+        inserted_parent_ids = {model.__tablename__: set() for model in selected_models}
         
         # Track which existing DB records we've already matched in this import session
-        # This prevents two identical backup rows from mapping to the SAME single DB row,
-        # which correctly restores perfectly identical line items that were dropped previously.
         matched_db_ids = set()
 
-        for model in MODELS:
+        for model in selected_models:
             table_name = model.__tablename__
             records = backup_data.get(table_name, [])
+            if not isinstance(records, list):
+                continue
             unique_cols = UNIQUE_KEYS.get(table_name)
+            valid_cols = {c.name for c in model.__table__.columns}
             
             # Introspect foreign keys for this model
             fks = {}
@@ -250,6 +337,8 @@ async def import_database(
                         fks[c.name] = fk.column.table.name
 
             for row in records:
+                if not isinstance(row, dict):
+                    continue
                 old_id = row.get('id')
                 
                 # A. Translate Foreign Keys
@@ -274,9 +363,16 @@ async def import_database(
 
                     # If the parent was just inserted, we don't deduplicate! We know it's a fresh child.
                     # This perfectly preserves identical line items in a fresh invoice.
-                    if unique_cols and not belongs_to_new_parent:
+                    row_unique_cols = unique_cols
+                    if table_name == 'store_purchase_stock_transactions':
+                        if row.get('receipt_line_id') is not None:
+                            row_unique_cols = ['receipt_line_id']
+                        else:
+                            row_unique_cols = ['item_id', 'transaction_type', 'quantity', 'transaction_date', 'reference_no']
+
+                    if row_unique_cols and not belongs_to_new_parent:
                         filters = {}
-                        for col in unique_cols:
+                        for col in row_unique_cols:
                             filters[col] = row.get(col)
                         
                         # Only query if we have at least one valid key value
@@ -290,7 +386,6 @@ async def import_database(
                                     matched_db_ids.add(match_key)
                                     break
 
-                        
                 if existing:
                     if old_id:
                         id_map[table_name][old_id] = existing.id
@@ -298,10 +393,11 @@ async def import_database(
                     continue # Skip duplicate
                     
                 # In merge mode, strip ID so it gets a new one. In replace mode, KEEP IT.
+                row_data = {k: v for k, v in row.items() if k in valid_cols}
                 if old_id and import_type == "merge":
-                    del row['id']
+                    row_data.pop('id', None)
                     
-                new_instance = model(**row)
+                new_instance = model(**row_data)
                 db.add(new_instance)
                 db.flush()
                 
@@ -313,20 +409,29 @@ async def import_database(
                     
         db.commit()
 
-        # D. Post-Import: Recalculate all cached quantities to guarantee dashboard accuracy
-        for po in db.query(PurchaseOrder).all():
-            recalc_po_delivered_quantities(db, po)
-        for wo in db.query(WorkOrder).all():
-            recalc_wo_completed_quantities(db, wo)
-        db.commit()
+        # D. Post-Import: Recalculate all cached quantities if marketing data was restored
+        if effective_scope in ("marketing", "all"):
+            for po in db.query(PurchaseOrder).all():
+                recalc_po_delivered_quantities(db, po)
+            for wo in db.query(WorkOrder).all():
+                recalc_wo_completed_quantities(db, wo)
+            db.commit()
 
+        try:
+            db.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
+        except Exception:
+            pass
         
         return {
-            "detail": "Database safely merged.",
+            "detail": "Database safely replaced." if import_type == "replace" else "Database safely merged.",
             "records_inserted": records_inserted,
             "records_skipped": records_skipped
         }
     
     except Exception as e:
         db.rollback()
+        try:
+            db.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=f"Merge failed, no changes made. Error: {str(e)}")

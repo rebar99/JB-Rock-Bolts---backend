@@ -527,6 +527,21 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         pass
 
+            # Soft-delete columns for store_purchase_orders
+            for col, dtype in [
+                ("is_deleted", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("deleted_at", "DATETIME NULL"),
+                ("deleted_by", "VARCHAR(100) NULL"),
+                ("permanent_delete_at", "DATETIME NULL"),
+            ]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM store_purchase_orders LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE store_purchase_orders ADD COLUMN {col} {dtype}"))
+                    except Exception:
+                        pass
+
     except Exception as e:
         logger.error(f"Error applying schema updates: {e}")
 
@@ -568,7 +583,7 @@ async def lifespan(app: FastAPI):
     def purge_expired_deleted_records():
         """Har 1 ghante mein check karo — jis record ka permanent_delete_at past mein
         aa gaya, usse permanently delete karo (including associated files)."""
-        from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale, CreditNote
+        from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale, CreditNote, StorePurchaseOrder
         db_purge = SessionLocal()
         try:
             now_naive = datetime.utcnow()
@@ -659,8 +674,18 @@ async def lifespan(app: FastAPI):
                 db_purge.delete(cn)
             db_purge.flush()
 
+            # Purge expired Store Purchase Orders
+            expired_store_pos = db_purge.query(StorePurchaseOrder).filter(
+                StorePurchaseOrder.is_deleted == True,
+                StorePurchaseOrder.permanent_delete_at <= now_naive,
+            ).all()
+            for spo in expired_store_pos:
+                logger.info(f"[AutoPurge] Permanently deleting Store PO id={spo.id} order={spo.order_number}")
+                db_purge.delete(spo)
+            db_purge.flush()
+
             db_purge.commit()
-            total = len(expired_sales) + len(expired_pos) + len(expired_wos) + len(expired_wo_sales)
+            total = len(expired_sales) + len(expired_pos) + len(expired_wos) + len(expired_wo_sales) + len(expired_credit_notes) + len(expired_store_pos)
             if total:
                 logger.info(f"[AutoPurge] Purged {total} expired soft-deleted record(s).")
         except Exception as ex:

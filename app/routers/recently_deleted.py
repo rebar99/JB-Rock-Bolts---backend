@@ -10,7 +10,7 @@ from pydantic import BaseModel
 import os
 
 from app.database import get_db
-from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale, CreditNote
+from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale, CreditNote, StorePurchaseOrder
 from app.utils.auth import require_admin
 from app.utils.helpers import log_activity, recalc_po_delivered_quantities, recalc_wo_completed_quantities
 
@@ -43,20 +43,28 @@ def _remaining_hours(permanent_delete_at):
 def _build_record(record_type, obj):
     if record_type == "sale":
         number = obj.invoice_number or f"Sale #{obj.id}"
+        party_name = obj.client_name
     elif record_type == "purchase_order":
         number = obj.po_number
+        party_name = obj.client_name
+    elif record_type == "store_purchase_order":
+        number = obj.order_number
+        party_name = obj.supplier or "Store Supplier"
     elif record_type == "work_order":
         number = obj.wo_number
+        party_name = obj.client_name
     elif record_type == "credit_note":
         number = obj.cn_number
+        party_name = obj.client_name
     else:  # work_order_sale
         number = obj.invoice_number or f"WO Sale #{obj.id}"
+        party_name = obj.client_name
 
     return DeletedRecordOut(
         id=obj.id,
         record_type=record_type,
         record_number=number,
-        client_name=obj.client_name,
+        client_name=party_name,
         deleted_by=obj.deleted_by,
         deleted_at=obj.deleted_at,
         permanent_delete_at=obj.permanent_delete_at,
@@ -68,15 +76,20 @@ def _build_record(record_type, obj):
 
 @router.get("", response_model=List[DeletedRecordOut])
 def list_recently_deleted(
-    module: Optional[str] = Query(None, description="Filter: sale | purchase_order | work_order | work_order_sale | credit_note"),
+    module: Optional[str] = Query(None, description="Filter: sale | purchase_order | store_purchase_order | work_order | work_order_sale | credit_note"),
+    workspace: Optional[str] = Query(None, description="Workspace filter: Marketing | Store"),
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    require_admin(authorization, db)
+    require_admin(authorization, db, app_code="any")
     records = []
     now = datetime.utcnow()
 
-    if module in (None, "all", "sale"):
+    ws = (workspace or "").strip().lower()
+    include_marketing = ws != "store"
+    include_store = ws != "marketing"
+
+    if include_marketing and module in (None, "all", "sale"):
         sales = (
             db.query(Sale)
             .filter(Sale.is_deleted == True, Sale.permanent_delete_at > now)
@@ -86,7 +99,7 @@ def list_recently_deleted(
         for s in sales:
             records.append(_build_record("sale", s))
 
-    if module in (None, "all", "purchase_order"):
+    if include_marketing and module in (None, "all", "purchase_order"):
         pos = (
             db.query(PurchaseOrder)
             .filter(PurchaseOrder.is_deleted == True, PurchaseOrder.permanent_delete_at > now)
@@ -96,7 +109,19 @@ def list_recently_deleted(
         for po in pos:
             records.append(_build_record("purchase_order", po))
 
-    if module in (None, "all", "work_order"):
+    # In Store workspace, the module filter might be sent as 'store_purchase_order' or 'purchase_order'
+    store_module_match = module in (None, "all", "store_purchase_order") or (ws == "store" and module in ("purchase_order", "store_po"))
+    if include_store and store_module_match:
+        store_pos = (
+            db.query(StorePurchaseOrder)
+            .filter(StorePurchaseOrder.is_deleted == True, StorePurchaseOrder.permanent_delete_at > now)
+            .order_by(StorePurchaseOrder.deleted_at.desc())
+            .all()
+        )
+        for spo in store_pos:
+            records.append(_build_record("store_purchase_order", spo))
+
+    if include_marketing and module in (None, "all", "work_order"):
         wos = (
             db.query(WorkOrder)
             .filter(WorkOrder.is_deleted == True, WorkOrder.permanent_delete_at > now)
@@ -106,7 +131,7 @@ def list_recently_deleted(
         for wo in wos:
             records.append(_build_record("work_order", wo))
 
-    if module in (None, "all", "work_order_sale"):
+    if include_marketing and module in (None, "all", "work_order_sale"):
         wo_sales = (
             db.query(WorkOrderSale)
             .filter(WorkOrderSale.is_deleted == True, WorkOrderSale.permanent_delete_at > now)
@@ -116,7 +141,7 @@ def list_recently_deleted(
         for wos in wo_sales:
             records.append(_build_record("work_order_sale", wos))
 
-    if module in (None, "all", "credit_note"):
+    if include_marketing and module in (None, "all", "credit_note"):
         credit_notes = (
             db.query(CreditNote)
             .filter(CreditNote.is_deleted == True, CreditNote.permanent_delete_at > now)
@@ -139,7 +164,7 @@ def restore_record(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    user = require_admin(authorization, db)
+    user = require_admin(authorization, db, app_code="any")
     now = datetime.utcnow()
 
     if record_type == "sale":
@@ -181,6 +206,23 @@ def restore_record(
             f"Restored PO {obj.po_number} from Recently Deleted.",
             user.name, obj.id, entity_name=obj.po_number)
         return _build_record("purchase_order", obj)
+
+    elif record_type == "store_purchase_order":
+        obj = db.query(StorePurchaseOrder).filter(StorePurchaseOrder.id == record_id, StorePurchaseOrder.is_deleted == True).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Deleted Store Purchase Order not found.")
+        if obj.permanent_delete_at and obj.permanent_delete_at < now:
+            raise HTTPException(status_code=410, detail="Store Purchase Order has already expired.")
+        obj.is_deleted = False
+        obj.deleted_at = None
+        obj.deleted_by = None
+        obj.permanent_delete_at = None
+        db.commit()
+        db.refresh(obj)
+        log_activity(db, "Store PO Restored", "StorePurchaseOrder",
+            f"Restored Store PO {obj.order_number} from Recently Deleted.",
+            user.name, obj.id, entity_name=obj.order_number, workspace="Store")
+        return _build_record("store_purchase_order", obj)
 
     elif record_type == "work_order":
         obj = db.query(WorkOrder).filter(WorkOrder.id == record_id, WorkOrder.is_deleted == True).first()
@@ -253,7 +295,7 @@ def permanent_delete_record(
     authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    user = require_admin(authorization, db)
+    user = require_admin(authorization, db, app_code="any")
 
     def _delete_file(url_str):
         if not url_str:
@@ -290,6 +332,16 @@ def permanent_delete_record(
         db.commit()
         log_activity(db, "PO Permanently Deleted", "PurchaseOrder",
             f"Admin permanently deleted PO {label}.", user.name, record_id, entity_name=label)
+
+    elif record_type == "store_purchase_order":
+        obj = db.query(StorePurchaseOrder).filter(StorePurchaseOrder.id == record_id, StorePurchaseOrder.is_deleted == True).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Deleted Store Purchase Order not found.")
+        label = obj.order_number
+        db.delete(obj)
+        db.commit()
+        log_activity(db, "Store PO Permanently Deleted", "StorePurchaseOrder",
+            f"Admin permanently deleted Store PO {label}.", user.name, record_id, entity_name=label, workspace="Store")
 
     elif record_type == "work_order":
         obj = db.query(WorkOrder).filter(WorkOrder.id == record_id, WorkOrder.is_deleted == True).first()

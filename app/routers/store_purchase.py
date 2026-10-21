@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import re
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
@@ -354,7 +354,10 @@ def remove_level_approver(level_id: int, user_id: int, _: User = Depends(require
 def pending_approvals(user: User = Depends(store_user), db: Session = Depends(get_db)):
     # Return only the current open stage. Pending rows kept from an "any one"
     # stage are historical assignment records, not actionable notifications.
-    orders = db.query(StorePurchaseOrder).filter(StorePurchaseOrder.status.in_(["Pending Approval", "Partially Approved"])).all()
+    orders = db.query(StorePurchaseOrder).filter(
+        StorePurchaseOrder.is_deleted == False,
+        StorePurchaseOrder.status.in_(["Pending Approval", "Partially Approved"])
+    ).all()
     result = []
     for order in orders:
         stages = {}
@@ -391,7 +394,7 @@ def act_on_approval(order_id: int, payload: ApprovalActionPayload, user: User = 
 def dashboard(_: User = Depends(store_user), db: Session = Depends(get_db)):
     items = db.query(StorePurchaseItem).all()
     return {"item_count": len(items), "low_stock_count": sum(1 for i in items if i.quantity <= i.reorder_level),
-            "purchase_order_count": db.query(StorePurchaseOrder).count()}
+            "purchase_order_count": db.query(StorePurchaseOrder).filter(StorePurchaseOrder.is_deleted == False).count()}
 
 @router.get("/inventory")
 def inventory(_: User = Depends(store_user), db: Session = Depends(get_db)):
@@ -539,14 +542,14 @@ def orders(_: User = Depends(store_user), db: Session = Depends(get_db)):
     # rather than exposing a retired status in the Purchase Order list.
     if db.query(StorePurchaseOrder).filter(StorePurchaseOrder.status == "Draft").update({"status": "Pending Approval"}, synchronize_session=False):
         db.commit()
-    records = db.query(StorePurchaseOrder).order_by(StorePurchaseOrder.created_at.desc()).all()
+    records = db.query(StorePurchaseOrder).filter(StorePurchaseOrder.is_deleted == False).order_by(StorePurchaseOrder.created_at.desc()).all()
     return [_order_response(record) for record in records]
 
 
 @router.get("/purchase-orders/{order_id}")
 def get_order(order_id: int, _: User = Depends(store_user), db: Session = Depends(get_db)):
     order = db.get(StorePurchaseOrder, order_id)
-    if not order:
+    if not order or order.is_deleted:
         raise HTTPException(status_code=404, detail="Purchase order not found.")
     if order.status == "Draft":
         order.status = "Pending Approval"
@@ -780,13 +783,18 @@ def create_order(payload: OrderPayload, user: User = Depends(store_admin), db: S
 
 @router.delete("/purchase-orders/{order_id}")
 def delete_order(order_id: int, _: User = Depends(store_admin), db: Session = Depends(get_db)):
-    """Delete the PO without changing independent Items/Stock records."""
+    """Soft delete the PO without changing independent Items/Stock records."""
     order = db.get(StorePurchaseOrder, order_id)
-    if not order: raise HTTPException(status_code=404, detail="Purchase Order not found.")
+    if not order or order.is_deleted: raise HTTPException(status_code=404, detail="Purchase Order not found.")
     order_number = order.order_number
-    db.delete(order); db.commit()
-    log_activity(db, "Store PO Deleted", "StorePurchaseOrder", f"Deleted Store PO {order_number}.", _.name, entity_name=order_number, workspace="Store")
-    return {"message": "Purchase Order deleted."}
+    now = datetime.utcnow()
+    order.is_deleted = True
+    order.deleted_at = now
+    order.deleted_by = _.name or "Store Admin"
+    order.permanent_delete_at = now + timedelta(hours=24)
+    db.commit()
+    log_activity(db, "Store PO Deleted", "StorePurchaseOrder", f"Soft-deleted Store PO {order_number}.", _.name, entity_name=order_number, workspace="Store")
+    return {"message": "Purchase Order moved to Recently Deleted."}
 
 @router.put("/purchase-orders/{order_id}")
 def update_order(order_id: int, payload: OrderPayload, user: User = Depends(store_admin), db: Session = Depends(get_db)):

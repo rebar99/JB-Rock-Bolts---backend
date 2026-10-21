@@ -121,6 +121,16 @@ def require_admin(authorization: str, db: Session, detail: str = "Admin access r
     user = db.get(User, user_id)
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    if app_code == "any":
+        is_adm = (
+            user.is_super_admin
+            or (user.email or "").lower() in SUPER_ADMIN_EMAILS
+            or application_role(user, db, "marketing") == "admin"
+            or application_role(user, db, "store_purchase") == "admin"
+        )
+        if not is_adm:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+        return user
     if application_role(user, db, app_code) != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
     return user
