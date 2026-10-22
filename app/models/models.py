@@ -505,6 +505,7 @@ class PurchaseOrder(Base):
     unit_price = Column(Float, nullable=False, default=0)
     gst = Column(String(20), nullable=True, default="18")
     freight = Column(Float, nullable=False, default=0)
+    freight_gst_type = Column(String(20), nullable=False, default="Without GST")
     payment_terms = Column(String(100), nullable=True)
     po_date = Column(DateTime, nullable=True)
     validity_date = Column(DateTime, nullable=True)
@@ -629,21 +630,41 @@ class PurchaseOrder(Base):
         return self.total_quantity * self.unit_price  # type: ignore
 
     @property
+    def effective_freight_gst_rate(self) -> float:
+        if (self.freight_gst_type or "").strip() != "With GST":
+            return 0.0
+        if self.gst_rate > 0:
+            return self.gst_rate
+        if self.line_items:
+            for li in self.line_items:
+                if li.gst_rate > 0:
+                    return li.gst_rate
+        return 18.0
+
+    @property
+    def freight_gst_amount(self) -> float:
+        if (self.freight_gst_type or "").strip() == "With GST" and (self.freight or 0) > 0:
+            return (self.freight or 0) * self.effective_freight_gst_rate / 100
+        return 0.0
+
+    @property
     def gst_amount(self) -> float:
+        base_gst = 0.0
         # If global GST is set on the PO, use it
         if self.gst and str(self.gst).strip() not in ("", "0"):
             if str(self.gst).startswith("₹"):
                 cleaned = str(self.gst).replace("₹", "").replace(",", "").strip()
                 try:
-                    return float(cleaned)
+                    base_gst = float(cleaned)
                 except ValueError:
-                    return 0.0
+                    base_gst = 0.0
             else:
-                return self.subtotal * self.gst_rate / 100
-        # Otherwise sum per-item GST
-        if self.line_items:
-            return sum(li.gst_amount for li in self.line_items)
-        return self.subtotal * self.gst_rate / 100
+                base_gst = self.subtotal * self.gst_rate / 100
+        elif self.line_items:
+            base_gst = sum(li.gst_amount for li in self.line_items)
+        else:
+            base_gst = self.subtotal * self.gst_rate / 100
+        return base_gst + self.freight_gst_amount
 
     @property
     def grand_total(self) -> float:
@@ -719,6 +740,7 @@ class Sale(Base):
     subtotal = Column(Numeric(12, 2), nullable=False, default=0)
     gst_amount = Column(Numeric(12, 2), nullable=False, default=0)
     freight = Column(Numeric(12, 2), nullable=False, default=0)
+    freight_gst_type = Column(String(20), nullable=False, default="Without GST")
     grand_total = Column(Numeric(12, 2), nullable=False, default=0)
     
     payment_status = Column(
@@ -760,6 +782,22 @@ class Sale(Base):
     @property
     def delivery_challan_urls(self) -> List[str]:
         return [url for url in (self.delivery_challan_url or "").split(";") if url]
+
+    @property
+    def effective_freight_gst_rate(self) -> float:
+        if (self.freight_gst_type or "").strip() != "With GST":
+            return 0.0
+        if self.items:
+            for item in self.items:
+                if (item.gst_rate or 0) > 0:
+                    return float(item.gst_rate)
+        return 18.0
+
+    @property
+    def freight_gst_amount(self) -> float:
+        if (self.freight_gst_type or "").strip() == "With GST" and (self.freight or 0) > 0:
+            return round(float(self.freight or 0) * self.effective_freight_gst_rate / 100, 2)
+        return 0.0
 
     @property
     def items_display(self) -> str:

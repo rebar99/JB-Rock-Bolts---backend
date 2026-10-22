@@ -127,6 +127,7 @@ class SaleCreate(BaseModel):
     subtotal: float
     gst_amount: float
     freight: float = 0
+    freight_gst_type: Optional[str] = "Without GST"
     grand_total: float
     payment_status: PaymentStatus = PaymentStatus.PENDING
     payment_note: Optional[str] = None
@@ -163,6 +164,7 @@ class SaleUpdate(BaseModel):
     subtotal: Optional[float] = None
     gst_amount: Optional[float] = None
     freight: Optional[float] = None
+    freight_gst_type: Optional[str] = None
     grand_total: Optional[float] = None
     updated_by: Optional[str] = None
 
@@ -175,6 +177,7 @@ class SaleOut(BaseModel):
     client_name: str
     project: Optional[str] = None
     freight: float
+    freight_gst_type: str = "Without GST"
     payment_status: PaymentStatus
     payment_note: Optional[str] = None
     created_at: UTCDatetime
@@ -207,9 +210,27 @@ class SaleOut(BaseModel):
 
     @computed_field
     @property
+    def effective_freight_gst_rate(self) -> float:
+        if (self.freight_gst_type or "").strip() != "With GST":
+            return 0.0
+        if self.items:
+            for item in self.items:
+                if (item.gst_rate or 0) > 0:
+                    return float(item.gst_rate)
+        return 18.0
+
+    @computed_field
+    @property
+    def freight_gst_amount(self) -> float:
+        if (self.freight_gst_type or "").strip() == "With GST" and (self.freight or 0) > 0:
+            return round((self.freight or 0) * self.effective_freight_gst_rate / 100, 2)
+        return 0.0
+
+    @computed_field
+    @property
     def gst_amount(self) -> float:
         _, gst_amount = compute_sale_taxable_and_gst(self.items)
-        return gst_amount
+        return round(gst_amount + self.freight_gst_amount, 2)
 
     @computed_field
     @property

@@ -67,6 +67,7 @@ class PurchaseOrderBase(BaseModel):
     location: Optional[str] = None
     gst: Optional[str] = "0"
     freight: float = 0
+    freight_gst_type: Optional[str] = "Without GST"
     payment_terms: Optional[str] = None
     po_date: Optional[datetime] = None
     validity_date: Optional[datetime] = None
@@ -85,6 +86,7 @@ class PurchaseOrderUpdate(BaseModel):
     location: Optional[str] = None
     gst: Optional[str] = None
     freight: Optional[float] = None
+    freight_gst_type: Optional[str] = None
     payment_terms: Optional[str] = None
     po_date: Optional[datetime] = None
     validity_date: Optional[datetime] = None
@@ -181,35 +183,58 @@ class PurchaseOrderOut(PurchaseOrderBase):
             return sum(li.quantity * li.unit_price for li in self.line_items)
         return 0
 
+    freight_gst_type: str = "Without GST"
+
+    @computed_field
+    @property
+    def effective_freight_gst_rate(self) -> float:
+        if (self.freight_gst_type or "").strip() != "With GST":
+            return 0.0
+        if self.gst_rate > 0:
+            return self.gst_rate
+        if self.line_items:
+            for li in self.line_items:
+                if li.gst_rate > 0:
+                    return li.gst_rate
+        return 18.0
+
+    @computed_field
+    @property
+    def freight_gst_amount(self) -> float:
+        if (self.freight_gst_type or "").strip() == "With GST" and (self.freight or 0) > 0:
+            return (self.freight or 0) * self.effective_freight_gst_rate / 100
+        return 0.0
+
     @computed_field
     @property
     def gst_amount(self) -> float:
+        base_gst = 0.0
         # 1. Global GST explicitly set to "0" → no GST at all (ignore line items)
         if self.gst is not None and self.gst.strip() == "0":
-            return 0.0
-
+            base_gst = 0.0
         # 2. Global GST set to a non-zero value
-        if self.gst and self.gst.strip() != "":
+        elif self.gst and self.gst.strip() != "":
             if self.gst.startswith("₹"):
                 cleaned = self.gst.replace("₹", "").replace(",", "").strip()
                 try:
-                    return float(cleaned)
+                    base_gst = float(cleaned)
                 except ValueError:
-                    return 0.0
+                    base_gst = 0.0
             else:
-                return self.subtotal * self.gst_rate / 100
-        
+                base_gst = self.subtotal * self.gst_rate / 100
         # 3. Global GST not set at all → sum line item GST
-        if self.line_items:
-            return sum(li.gst_amount for li in self.line_items)
+        elif self.line_items:
+            base_gst = sum(li.gst_amount for li in self.line_items)
+        else:
+            base_gst = 0.0
             
-        return 0.0
+        return base_gst + self.freight_gst_amount
 
     @computed_field
     @property
     def grand_total(self) -> float:
         items_freight = sum(li.freight for li in self.line_items) if self.line_items else 0.0
-        return self.subtotal + self.gst_amount + self.freight + items_freight
+        return self.subtotal + self.gst_amount + (self.freight or 0) + items_freight
 
     all_dispatches_marked: bool = False
 

@@ -1071,7 +1071,7 @@ def get_invoice_document(sale_id: int, download: bool = False, db: Session = Dep
           <td class="val">{_fmt_inr(sgst_amt) if sgst_amt else '—'}</td>
         </tr>
         <tr>
-          <td class="lbl">Freight / P&amp;F</td>
+          <td class="lbl">Freight / P&amp;F{' (With GST)' if getattr(sale, 'freight_gst_type', None) == 'With GST' else ''}</td>
           <td class="val">{_fmt_inr(sale.freight)}</td>
         </tr>
         <tr>

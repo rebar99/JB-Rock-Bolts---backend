@@ -137,6 +137,15 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     pass
 
+            # Safely migrate purchase_orders.freight_gst_type
+            try:
+                conn.execute(text("SELECT freight_gst_type FROM purchase_orders LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("ALTER TABLE purchase_orders ADD COLUMN freight_gst_type VARCHAR(20) NOT NULL DEFAULT 'Without GST'"))
+                except Exception:
+                    pass
+
             # Safely migrate purchase_orders.remark
             try:
                 conn.execute(text("SELECT remark FROM purchase_orders LIMIT 1"))
@@ -193,6 +202,7 @@ async def lifespan(app: FastAPI):
             for col, dtype in [
                 ("subtotal", "FLOAT DEFAULT 0"),
                 ("gst_amount", "FLOAT DEFAULT 0"),
+                ("freight_gst_type", "VARCHAR(20) NOT NULL DEFAULT 'Without GST'"),
                 ("grand_total", "FLOAT DEFAULT 0"),
                 ("e_way_bill_no", "VARCHAR(100) NULL"),
                 ("hsn_code", "VARCHAR(50) NULL"),

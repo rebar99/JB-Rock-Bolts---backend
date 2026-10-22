@@ -370,6 +370,7 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db), current_user
         subtotal=payload.subtotal,
         gst_amount=payload.gst_amount,
         freight=payload.freight,
+        freight_gst_type=payload.freight_gst_type or "Without GST",
         grand_total=payload.grand_total,
         payment_status=payload.payment_status,
         payment_note=payload.payment_note,
