@@ -99,6 +99,7 @@ class StorePurchaseItem(Base):
     total_received_quantity = Column(Float, nullable=False, default=0)
     issued_quantity = Column(Float, nullable=False, default=0)
     status = Column(String(30), nullable=False, default="In Stock")
+    out_of_stock_limit = Column(Float, nullable=False, default=0.0)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     transactions = relationship("StorePurchaseStockTransaction", back_populates="item", cascade="all, delete-orphan", order_by="StorePurchaseStockTransaction.transaction_date.desc()")
@@ -199,7 +200,14 @@ class POApprovalLevel(Base):
     approval_rule = Column(String(10), nullable=False, default="any")  # any | all
     is_enabled = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, server_default=func.now())
+    # Signature configuration for this amount slab
+    checked_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    checked_by_signature_url = Column(String(500), nullable=True)
+    approved_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_by_signature_url = Column(String(500), nullable=True)
     approvers = relationship("POApprovalLevelApprover", back_populates="level", cascade="all, delete-orphan")
+    checked_by_user = relationship("User", foreign_keys="[POApprovalLevel.checked_by_user_id]", uselist=False)
+    approved_by_user = relationship("User", foreign_keys="[POApprovalLevel.approved_by_user_id]", uselist=False)
 
 
 class POApprovalLevelApprover(Base):
@@ -220,6 +228,31 @@ class POApproverPermission(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     max_approval_amount = Column(Float, nullable=True)  # NULL means unlimited
     is_enabled = Column(Boolean, nullable=False, default=True)
+    user = relationship("User")
+
+
+class POPreparedByConfig(Base):
+    """Legacy singleton — kept for backward compat, superseded by POPreparedBySignature."""
+    __tablename__ = "po_prepared_by_config"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_name = Column(String(100), nullable=True)
+    signature_url = Column(String(500), nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_by = Column(String(100), nullable=True)
+    user = relationship("User")
+
+
+class POPreparedBySignature(Base):
+    """One row per Prepared-By person — supports multiple signatories on the PO."""
+    __tablename__ = "po_prepared_by_signatures"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
+    user_name = Column(String(100), nullable=True)   # cached for display
+    signature_url = Column(String(500), nullable=True)
+    display_order = Column(Integer, nullable=False, default=0)
+    added_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     user = relationship("User")
 
 

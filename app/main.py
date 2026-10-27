@@ -419,7 +419,7 @@ async def lifespan(app: FastAPI):
                 ("previous_quantity", "FLOAT NOT NULL DEFAULT 0"),
                 ("current_month_quantity", "FLOAT NOT NULL DEFAULT 0"),
                 ("total_received_quantity", "FLOAT NOT NULL DEFAULT 0"),
-                ("issued_quantity", "FLOAT NOT NULL DEFAULT 0"), ("status", "VARCHAR(30) NOT NULL DEFAULT 'In Stock'"),
+                ("issued_quantity", "FLOAT NOT NULL DEFAULT 0"), ("status", "VARCHAR(30) NOT NULL DEFAULT 'In Stock'"), ("out_of_stock_limit", "FLOAT NOT NULL DEFAULT 0"),
             ]:
                 try:
                     conn.execute(text(f"SELECT {col} FROM store_purchase_items LIMIT 1"))
