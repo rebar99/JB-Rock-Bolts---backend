@@ -552,6 +552,63 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         pass
 
+            # ── PO Approval Level signature columns ─────────────────────────────
+            for col, dtype in [
+                ("checked_by_user_id",       "INT NULL"),
+                ("checked_by_signature_url", "VARCHAR(500) NULL"),
+                ("approved_by_user_id",      "INT NULL"),
+                ("approved_by_signature_url","VARCHAR(500) NULL"),
+            ]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM po_approval_levels LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE po_approval_levels ADD COLUMN {col} {dtype}"))
+                        logger.info(f"[Migration] Added po_approval_levels.{col}")
+                    except Exception as _e:
+                        logger.warning(f"[Migration] po_approval_levels.{col}: {_e}")
+
+            # ── po_prepared_by_config (legacy singleton) ─────────────────────────
+            try:
+                conn.execute(text("SELECT id FROM po_prepared_by_config LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS po_prepared_by_config (
+                            id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                            user_id INT NULL,
+                            user_name VARCHAR(100) NULL,
+                            signature_url VARCHAR(500) NULL,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            updated_by VARCHAR(100) NULL,
+                            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+                        ) CHARACTER SET utf8mb4
+                    """))
+                    logger.info("[Migration] Created po_prepared_by_config table")
+                except Exception as _e:
+                    logger.warning(f"[Migration] po_prepared_by_config: {_e}")
+
+            # ── po_prepared_by_signatures (multi-user prepared-by) ───────────────
+            try:
+                conn.execute(text("SELECT id FROM po_prepared_by_signatures LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS po_prepared_by_signatures (
+                            id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                            user_id INT NOT NULL UNIQUE,
+                            user_name VARCHAR(100) NULL,
+                            signature_url VARCHAR(500) NULL,
+                            display_order INT NOT NULL DEFAULT 0,
+                            added_by VARCHAR(100) NULL,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                        ) CHARACTER SET utf8mb4
+                    """))
+                    logger.info("[Migration] Created po_prepared_by_signatures table")
+                except Exception as _e:
+                    logger.warning(f"[Migration] po_prepared_by_signatures: {_e}")
+
     except Exception as e:
         logger.error(f"Error applying schema updates: {e}")
 

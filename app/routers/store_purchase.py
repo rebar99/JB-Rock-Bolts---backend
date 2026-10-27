@@ -1976,7 +1976,20 @@ def reports(_: User = Depends(store_user), db: Session = Depends(get_db)):
 def _build_signature_config(order: StorePurchaseOrder, db):
     """Build the signature_config dict for a PO response.
     Determines the applicable approval level slab from grand_total,
-    then checks approval history to decide which signatures to show."""
+    then checks approval history to decide which signatures to show.
+    Returns a safe empty config on any DB error (e.g. tables not migrated yet)."""
+    try:
+        return _build_signature_config_inner(order, db)
+    except Exception:
+        return {
+            "prepared_by_list": [],
+            "checked_by":  {"user_id": None, "user_name": None, "signature_url": None, "approved": False, "action_at": None},
+            "approved_by": {"user_id": None, "user_name": None, "signature_url": None, "approved": False, "action_at": None},
+        }
+
+
+def _build_signature_config_inner(order: StorePurchaseOrder, db):
+    """Inner implementation — called by _build_signature_config with error guard."""
     from app.models.models import POPreparedByConfig
     detail = order.details
     grand_total = detail.grand_total if detail else 0
