@@ -7,30 +7,34 @@ class ItemMasterCreate(BaseModel):
     name: str
     type: Optional[str] = "PO"
     created_by: Optional[str] = None
+    uom: Optional[str] = None
 
 
 class ItemMasterUpdate(BaseModel):
     name: str
     type: Optional[str] = "PO"
     updated_by: Optional[str] = None
+    uom: Optional[str] = None
 
 
 class ItemMasterSizeCreate(BaseModel):
     size: str
     type: Optional[str] = "PO"
     created_by: Optional[str] = None
+    uom: Optional[str] = None
 
 
 class ItemMasterSizeUpdate(BaseModel):
     size: str
     type: Optional[str] = "PO"
     updated_by: Optional[str] = None
-
+    uom: Optional[str] = None
 
 
 class ItemMasterSizeOut(BaseModel):
     id: int
     size: str
+    uom: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -38,6 +42,7 @@ class ItemMasterSizeOut(BaseModel):
 class ItemMasterOut(BaseModel):
     id: int
     name: str
+    uom: Optional[str] = None
     sizes: List[ItemMasterSizeOut] = []
     created_at: datetime
     created_by: Optional[str] = None

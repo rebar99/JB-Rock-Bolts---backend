@@ -9,7 +9,7 @@ from app.database import get_db
 from app.models.models import SystemLog, User
 from app.schemas.log import SystemLogOut
 from app import notifications
-from app.utils.auth import get_current_user
+from app.utils.auth import get_current_user, get_current_user_from_token
 
 router = APIRouter(prefix="/api/logs", tags=["Logs"])
 
@@ -45,6 +45,7 @@ async def stream_logs(
     user_name: Optional[str] = None,
     user_email: Optional[str] = None,
     workspace: Optional[str] = None,
+    authenticated_user: User = Depends(get_current_user_from_token),
 ):
     """SSE endpoint — pushes new SystemLog entries to the browser in real time.
 
@@ -52,6 +53,11 @@ async def stream_logs(
     can track which users currently have the app open and where they are logged in.
     """
     queue: asyncio.Queue = asyncio.Queue()
+    # EventSource cannot set an Authorization header; trust the validated token,
+    # never the caller-supplied user_id used by older presence clients.
+    user_id = authenticated_user.id
+    user_name = authenticated_user.name
+    user_email = authenticated_user.email
     notifications.add_client(queue, user_id, user_name or "", user_email or "", workspace or "")
 
     async def event_gen():

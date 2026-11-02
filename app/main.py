@@ -568,6 +568,25 @@ async def lifespan(app: FastAPI):
                     except Exception as _e:
                         logger.warning(f"[Migration] po_approval_levels.{col}: {_e}")
 
+            # ── PO approval audit snapshots ────────────────────────────────────
+            for col, dtype in [("created_by_user_id", "INT NULL"), ("approval_cycle", "INT NOT NULL DEFAULT 1")]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM store_purchase_orders LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE store_purchase_orders ADD COLUMN {col} {dtype}"))
+                    except Exception as _e:
+                        logger.warning(f"[Migration] store_purchase_orders.{col}: {_e}")
+            for col, dtype in [("approver_name", "VARCHAR(100) NULL"), ("remarks", "TEXT NULL"), ("workflow_role", "VARCHAR(30) NOT NULL DEFAULT 'approver'"), ("signature_url", "VARCHAR(500) NULL"), ("next_approver_id", "INT NULL"), ("next_approver_name", "VARCHAR(100) NULL"), ("next_signature_url", "VARCHAR(500) NULL"), ("approval_cycle", "INT NOT NULL DEFAULT 1")]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM store_purchase_order_approvals LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE store_purchase_order_approvals ADD COLUMN {col} {dtype}"))
+                        logger.info(f"[Migration] Added store_purchase_order_approvals.{col}")
+                    except Exception as _e:
+                        logger.warning(f"[Migration] store_purchase_order_approvals.{col}: {_e}")
+
             # ── po_prepared_by_config (legacy singleton) ─────────────────────────
             try:
                 conn.execute(text("SELECT id FROM po_prepared_by_config LIMIT 1"))
@@ -808,6 +827,7 @@ async def enforce_marketing_application_access(request, call_next):
     is_shared_request = (
         path.startswith("/api/logs")
         or path.startswith("/api/company-addresses")
+        or path.startswith("/api/recently-deleted")
     )
     public_or_non_marketing = (
         not path.startswith("/api/")
@@ -823,20 +843,30 @@ async def enforce_marketing_application_access(request, call_next):
     from app.utils.auth import get_user_id_from_token, _decode_raw_token, require_application_access
     from app.models.models import User
     from fastapi.responses import JSONResponse
+    def _cors_response(status_code: int, content: dict) -> JSONResponse:
+        resp = JSONResponse(status_code=status_code, content=content)
+        origin = request.headers.get("origin")
+        if origin:
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers["Access-Control-Allow-Credentials"] = "true"
+            resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+            resp.headers["Access-Control-Allow-Headers"] = "*"
+        return resp
+
     authorization = request.headers.get("Authorization", "")
     user_id = get_user_id_from_token(authorization) or _decode_raw_token(request.query_params.get("token", ""))
     if not user_id:
-        return JSONResponse(status_code=401, content={"detail": "Invalid or expired token."})
+        return _cors_response(401, {"detail": "Invalid or expired token."})
     db = SessionLocal()
     try:
         user = db.get(User, user_id)
         if not user or not user.is_active:
-            return JSONResponse(status_code=401, content={"detail": "User not found or inactive."})
+            return _cors_response(401, {"detail": "User not found or inactive."})
         if not is_shared_request:
             try:
                 require_application_access(user, db, "marketing")
             except Exception as exc:
-                return JSONResponse(status_code=403, content={"detail": getattr(exc, "detail", "No Marketing access.")})
+                return _cors_response(403, {"detail": getattr(exc, "detail", "No Marketing access.")})
     finally:
         db.close()
     return await call_next(request)

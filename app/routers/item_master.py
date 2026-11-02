@@ -67,6 +67,8 @@ def create_item(
         raise HTTPException(status_code=409, detail=f"Item '{name}' already exists.")
 
     item = Model(name=name, created_by=payload.created_by or "System")
+    if hasattr(Model, "uom") and payload.uom:
+        item.uom = payload.uom
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -102,6 +104,8 @@ def update_item(
 
     old_name = item.name
     item.name = name
+    if hasattr(Model, "uom") and payload.uom is not None:
+        item.uom = payload.uom
     item.updated_by = payload.updated_by or "System"
     item.updated_at = datetime.utcnow()
     db.commit()
@@ -173,6 +177,8 @@ def add_item_size(
         raise HTTPException(status_code=409, detail=f"Size '{size}' already exists for '{item.name}'.")
 
     row = SizeModel(item_id=item_id, size=size, created_by=payload.created_by or "System")
+    if hasattr(SizeModel, "uom") and payload.uom:
+        row.uom = payload.uom
     db.add(row)
     db.commit()
     db.refresh(row)
@@ -217,6 +223,8 @@ def update_item_size(
 
     old_size = row.size
     row.size = size
+    if hasattr(SizeModel, "uom") and payload.uom is not None:
+        row.uom = payload.uom
     db.commit()
     db.refresh(row)
 

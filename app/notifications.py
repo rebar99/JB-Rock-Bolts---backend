@@ -30,6 +30,7 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 
 # Maps each queue to the workspace it belongs to
 _clients: dict[asyncio.Queue, str] = {}
+_client_user_ids: dict[asyncio.Queue, int | None] = {}
 
 # user_id -> {user_id, user_name, user_email, workspace, connected_at}
 _online_users: dict[int, dict] = {}
@@ -64,6 +65,7 @@ def add_client(q: asyncio.Queue, user_id: Optional[int] = None,
                user_name: str = "", user_email: str = "",
                workspace: str = "") -> None:
     _clients[q] = _normalize_workspace(workspace)
+    _client_user_ids[q] = user_id
     if user_id:
         _user_conn_count[user_id] = _user_conn_count.get(user_id, 0) + 1
         prev_connected = _online_users.get(user_id, {}).get("connected_at")
@@ -79,6 +81,7 @@ def add_client(q: asyncio.Queue, user_id: Optional[int] = None,
 
 def remove_client(q: asyncio.Queue, user_id: Optional[int] = None) -> None:
     _clients.pop(q, None)
+    _client_user_ids.pop(q, None)
     if user_id:
         _user_conn_count[user_id] = max(0, _user_conn_count.get(user_id, 0) - 1)
         if _user_conn_count[user_id] == 0:
@@ -94,6 +97,19 @@ def remove_user(user_id: int) -> None:
 
 def get_online_users() -> list:
     return list(_online_users.values())
+
+
+def notify_user(user_id: int, title: str, message: str, *, order_id: int | None = None) -> None:
+    """Send a private real-time popup over the user's authenticated SSE session(s)."""
+    if not _loop:
+        return
+    payload = json.dumps({"type": "PO_NOTIFICATION", "title": title, "message": message, "order_id": order_id})
+    for q, connected_user_id in list(_client_user_ids.items()):
+        if connected_user_id == user_id:
+            try:
+                _loop.call_soon_threadsafe(q.put_nowait, payload)
+            except Exception:
+                pass
 
 
 def broadcast(log_entry) -> None:

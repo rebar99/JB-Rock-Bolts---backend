@@ -10,7 +10,7 @@ from pydantic import BaseModel
 import os
 
 from app.database import get_db
-from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale, CreditNote, StorePurchaseOrder
+from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale, CreditNote, StorePurchaseOrder, StorePONotification, StorePurchaseStockTransaction
 from app.utils.auth import require_admin
 from app.utils.helpers import log_activity, recalc_po_delivered_quantities, recalc_wo_completed_quantities
 
@@ -338,6 +338,11 @@ def permanent_delete_record(
         if not obj:
             raise HTTPException(status_code=404, detail="Deleted Store Purchase Order not found.")
         label = obj.order_number
+        db.query(StorePONotification).filter(StorePONotification.order_id == record_id).delete(synchronize_session=False)
+        for rcpt in (obj.material_receipts or []):
+            line_ids = [line.id for line in (rcpt.lines or [])]
+            if line_ids:
+                db.query(StorePurchaseStockTransaction).filter(StorePurchaseStockTransaction.receipt_line_id.in_(line_ids)).update({StorePurchaseStockTransaction.receipt_line_id: None}, synchronize_session=False)
         db.delete(obj)
         db.commit()
         log_activity(db, "Store PO Permanently Deleted", "StorePurchaseOrder",

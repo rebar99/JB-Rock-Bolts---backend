@@ -176,6 +176,8 @@ class StorePurchaseOrder(Base):
     po_type = Column(String(30), nullable=False, default="Regular Vendor PO", server_default="Regular Vendor PO")
     created_at = Column(DateTime, server_default=func.now())
     created_by = Column(String(100), nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approval_cycle = Column(Integer, nullable=False, default=1, server_default="1")
 
     # Soft-delete fields
     is_deleted = Column(Boolean, default=False, nullable=False, server_default="0")
@@ -188,6 +190,7 @@ class StorePurchaseOrder(Base):
     material_receipts = relationship("StorePurchaseMaterialReceipt", back_populates="order", cascade="all, delete-orphan")
     activities = relationship("StorePurchaseOrderActivity", back_populates="order", cascade="all, delete-orphan", order_by="StorePurchaseOrderActivity.created_at.desc()")
     approvals = relationship("StorePurchaseOrderApproval", back_populates="order", cascade="all, delete-orphan", order_by="StorePurchaseOrderApproval.level_order, StorePurchaseOrderApproval.id")
+    notifications = relationship("StorePONotification", back_populates="order", cascade="all, delete-orphan")
 
 
 class POApprovalLevel(Base):
@@ -266,11 +269,19 @@ class StorePurchaseOrderApproval(Base):
     level_order = Column(Integer, nullable=False, default=1)
     approval_rule = Column(String(10), nullable=False, default="any")
     approver_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    approver_name = Column(String(100), nullable=True)
     action = Column(String(20), nullable=False, default="Pending")
     action_at = Column(DateTime, nullable=True)
     rejection_reason = Column(Text, nullable=True)
+    remarks = Column(Text, nullable=True)
+    workflow_role = Column(String(30), nullable=False, default="approver")
+    signature_url = Column(String(500), nullable=True)
+    next_approver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    next_approver_name = Column(String(100), nullable=True)
+    next_signature_url = Column(String(500), nullable=True)
+    approval_cycle = Column(Integer, nullable=False, default=1, server_default="1")
     order = relationship("StorePurchaseOrder", back_populates="approvals")
-    approver = relationship("User")
+    approver = relationship("User", foreign_keys=[approver_id])
 
 
 class StorePurchaseOrderActivity(Base):
@@ -286,6 +297,22 @@ class StorePurchaseOrderActivity(Base):
 
     order = relationship("StorePurchaseOrder", back_populates="activities")
 
+
+
+class StorePONotification(Base):
+    """Persistent per-user PO event notifications (rejections, approvals)."""
+    __tablename__ = "store_po_notifications"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    order_id = Column(Integer, ForeignKey("store_purchase_orders.id"), nullable=True, index=True)
+    title = Column(String(200), nullable=False)
+    message = Column(String(1000), nullable=False)
+    is_read = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    user = relationship("User")
+    order = relationship("StorePurchaseOrder", back_populates="notifications")
 
 class StorePurchaseOrderDetail(Base):
     """Vendor-facing PO header, totals and terms.  Kept Store-only so it
@@ -411,6 +438,7 @@ class StorePOItemMasterItem(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(300), nullable=False, unique=True, index=True)
+    uom = Column(String(50), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     created_by = Column(String(100), nullable=True)
     updated_at = Column(DateTime, nullable=True)
@@ -425,6 +453,7 @@ class StorePOItemMasterSize(Base):
     id = Column(Integer, primary_key=True, index=True)
     item_id = Column(Integer, ForeignKey("store_po_item_master.id"), nullable=False)
     size = Column(String(500), nullable=False)
+    uom = Column(String(50), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     created_by = Column(String(100), nullable=True)
 
@@ -1377,6 +1406,7 @@ class StoreVendor(Base):
     contact = Column(String(100), nullable=True)
     address = Column(Text, nullable=True)
     items_supplied = Column(Text, nullable=True)
+    uoms_supplied = Column(Text, nullable=True)
     status = Column(String(50), nullable=False, default="Active")
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
