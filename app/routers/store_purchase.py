@@ -7807,181 +7807,152 @@ def create_material_receipt(payload: MaterialReceiptPayload, user: User = Depend
 
 
 def update_material_receipt(receipt_id: int, payload: MaterialReceiptPayload, user: User = Depends(store_admin), db: Session = Depends(get_db)):
-
-
-
-
-
-
-
     receipt = db.get(StorePurchaseMaterialReceipt, receipt_id)
-
-
-
-
-
-
-
     if not receipt:
-
-
-
-
-
-
-
         raise HTTPException(status_code=404, detail="Material receipt not found.")
 
-
-
-
-
-
-
-    raise HTTPException(status_code=409, detail="A posted material receipt cannot be edited because its inventory transaction is already recorded.")
-
-
-
-
-
-
-
     order = db.get(StorePurchaseOrder, payload.order_id)
-
-
-
-
-
-
-
     if not order:
-
-
-
-
-
-
-
         raise HTTPException(status_code=404, detail="Purchase Order not found.")
 
-
-
-
-
-
-
     ordered_by_item = {line.item_description.strip().lower(): line.quantity for line in order.line_items}
-
-
-
-
-
-
-
     for line in payload.lines:
-
-
-
-
-
-
-
         ordered_quantity = ordered_by_item.get(line.item_description.strip().lower())
-
-
-
-
-
-
-
         if ordered_quantity is None or line.received_quantity > ordered_quantity:
-
-
-
-
-
-
-
             raise HTTPException(status_code=422, detail=f"Invalid received quantity for '{line.item_description}'.")
 
-
-
-
-
-
+    # Check if lines or received quantities changed
+    existing_lines_map = {
+        (line.item_description.strip().lower(), float(line.unit_rate or 0)): float(line.received_quantity or 0)
+        for line in receipt.lines
+    }
+    payload_lines_map = {
+        (line.item_description.strip().lower(), float(line.unit_rate or 0)): float(line.received_quantity or 0)
+        for line in payload.lines
+    }
+    lines_changed = (existing_lines_map != payload_lines_map or len(receipt.lines) != len(payload.lines))
 
     detail = order.details
+    receipt.order_id = order.id
+    receipt.invoice_date = payload.invoice_date
+    receipt.invoice_number = payload.invoice_number.strip()
+    receipt.freight_charge = payload.freight_charge
+    receipt.bill_file_url = payload.bill_file_url
+    receipt.vendor_name = order.supplier
+    receipt.reference = detail.reference if detail else None
+    receipt.vendor_code = detail.vendor_code if detail else None
+    receipt.remarks = payload.remarks
+    receipt.updated_by = user.name
+    receipt.updated_at = datetime.utcnow()
 
+    if lines_changed:
+        receipt_line_ids = [line.id for line in receipt.lines]
+        if receipt_line_ids:
+            from datetime import date as _date
+            txs = db.query(StorePurchaseStockTransaction).filter(
+                StorePurchaseStockTransaction.receipt_line_id.in_(receipt_line_ids)
+            ).all()
 
+            for tx in txs:
+                item = db.get(StorePurchaseItem, tx.item_id)
+                if item:
+                    qty = float(tx.quantity or 0)
+                    item.quantity = max(0.0, float(item.quantity or 0) - qty)
+                    item.total_received_quantity = max(0.0, float(item.total_received_quantity or 0) - qty)
+                    if tx.transaction_date:
+                        td = tx.transaction_date if isinstance(tx.transaction_date, _date) else tx.transaction_date.date()
+                        today = _date.today()
+                        if td.year == today.year and td.month == today.month:
+                            item.current_month_quantity = max(0.0, float(item.current_month_quantity or 0) - qty)
+                    item.status = _calculate_status(
+                        item.quantity,
+                        getattr(item, 'out_of_stock_limit', 0.0),
+                        getattr(item, 'reorder_level', 0.0)
+                    )
+                    if item.quantity <= 0:
+                        item.rate = 0.0
+                        if item.reference_no and tx.reference_no and item.reference_no == tx.reference_no:
+                            item.reference_no = None
+                            item.vendor_name = None
+                    else:
+                        rem_tx = db.query(StorePurchaseStockTransaction).filter(
+                            StorePurchaseStockTransaction.item_id == item.id,
+                            StorePurchaseStockTransaction.id != tx.id,
+                            StorePurchaseStockTransaction.transaction_type == 'RECEIPT'
+                        ).order_by(StorePurchaseStockTransaction.id.desc()).first()
+                        if rem_tx:
+                            item.rate = rem_tx.rate or 0.0
+                            item.vendor_name = rem_tx.vendor_name
+                            item.reference_no = rem_tx.reference_no
 
+                stock_items = db.query(StorePurchaseStockItem).filter(
+                    StorePurchaseStockItem.material_id == tx.item_id
+                ).all()
 
+                if len(stock_items) == 1:
+                    si = stock_items[0]
+                    si.total_received_quantity = max(0.0, float(si.total_received_quantity or 0) - float(tx.quantity or 0))
+                    si.available_quantity = max(0.0, float(si.available_quantity or 0) - float(tx.quantity or 0))
+                    if (si.available_quantity or 0) <= 0:
+                        si.rate = 0.0
+                        si.vendor_name = None
+                elif len(stock_items) > 1:
+                    matched_line = next((ln for ln in receipt.lines if ln.id == tx.receipt_line_id), None)
+                    if matched_line:
+                        norm_name = (matched_line.item_description or '').strip().lower()
+                        for si in stock_items:
+                            if (si.name or '').strip().lower() == norm_name:
+                                si.total_received_quantity = max(0.0, float(si.total_received_quantity or 0) - float(tx.quantity or 0))
+                                si.available_quantity = max(0.0, float(si.available_quantity or 0) - float(tx.quantity or 0))
+                                if (si.available_quantity or 0) <= 0:
+                                    si.rate = 0.0
+                                    si.vendor_name = None
+                                break
 
+                tx.receipt_line_id = None
+                db.flush()
+                db.delete(tx)
 
+            db.flush()
 
-    receipt.order_id = order.id; receipt.invoice_date = payload.invoice_date; receipt.invoice_number = payload.invoice_number.strip()
+        db.query(StorePurchaseMaterialReceiptLine).filter_by(receipt_id=receipt.id).delete(synchronize_session=False)
+        new_lines = [
+            StorePurchaseMaterialReceiptLine(
+                receipt_id=receipt.id,
+                line_number=index,
+                item_description=line.item_description.strip(),
+                ordered_quantity=line.ordered_quantity,
+                received_quantity=line.received_quantity,
+                uom=line.uom.strip() or "Nos",
+                unit_rate=line.unit_rate,
+                amount=round(line.received_quantity * line.unit_rate, 2)
+            )
+            for index, line in enumerate(payload.lines, start=1)
+        ]
+        db.add_all(new_lines)
+        db.flush()
 
+        for line in new_lines:
+            if line.received_quantity > 0:
+                group_name, item_name = _inventory_group_and_item(db, line.item_description)
+                _record_receipt(
+                    db,
+                    name=group_name,
+                    stock_item=item_name,
+                    quantity=line.received_quantity,
+                    rate=line.unit_rate,
+                    vendor_name=order.supplier,
+                    reference_no=order.order_number,
+                    receipt_date=payload.invoice_date,
+                    uom=line.uom,
+                    user_name=user.name,
+                    receipt_line_id=line.id,
+                )
 
+        _refresh_po_received_status(db, order)
 
-
-
-
-
-    receipt.freight_charge = payload.freight_charge; receipt.bill_file_url = payload.bill_file_url; receipt.vendor_name = order.supplier
-
-
-
-
-
-
-
-    receipt.reference = detail.reference if detail else None; receipt.vendor_code = detail.vendor_code if detail else None; receipt.remarks = payload.remarks
-
-
-
-
-
-
-
-    db.query(StorePurchaseMaterialReceiptLine).filter_by(receipt_id=receipt.id).delete(synchronize_session=False)
-
-
-
-
-
-
-
-    db.add_all([StorePurchaseMaterialReceiptLine(receipt_id=receipt.id, line_number=index, item_description=line.item_description.strip(), ordered_quantity=line.ordered_quantity, received_quantity=line.received_quantity, uom=line.uom.strip() or "Nos", unit_rate=line.unit_rate, amount=round(line.received_quantity * line.unit_rate, 2)) for index, line in enumerate(payload.lines, start=1)])
-
-
-
-
-
-
-
-    db.flush()
-
-
-
-
-
-
-
-    _refresh_po_received_status(db, order)
-
-
-
-
-
-
-
-    db.commit(); db.refresh(receipt)
-
-
-
-
-
-
-
+    db.commit()
+    db.refresh(receipt)
     return _material_receipt_response(receipt)
 
 
