@@ -651,6 +651,19 @@ async def lifespan(app: FastAPI):
         db.commit()
         from app.services.seed import run_seed
         run_seed(db)
+
+        # Recalculate all PO and WO quantities to ensure database is perfectly synced
+        try:
+            from app.models.models import PurchaseOrder, WorkOrder
+            from app.utils.helpers import recalc_po_delivered_quantities, recalc_wo_completed_quantities
+            for po_rec in db.query(PurchaseOrder).all():
+                recalc_po_delivered_quantities(db, po_rec)
+            for wo_rec in db.query(WorkOrder).all():
+                recalc_wo_completed_quantities(db, wo_rec)
+            db.commit()
+            logger.info('[Startup] Recalculated all PO and WO delivered quantities.')
+        except Exception as _recalc_err:
+            logger.warning(f'[Startup] Error recalculating quantities: {_recalc_err}')
         # On every server start, mark all previously "active" sessions as logged out.
         # This prevents stale "Online" entries in History when the server was restarted
         # and users didn't explicitly logout (SSE connection was cut by the restart).
