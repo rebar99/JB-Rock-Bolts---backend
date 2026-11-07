@@ -315,6 +315,14 @@ async def import_database(
                     db.query(model).delete(synchronize_session=False)
                 db.commit()
             
+        try:
+            db.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
+        except Exception:
+            pass
+
+        table_to_model = {m.__tablename__: m for m in MODELS}
+        existing_ids_cache = {m.__tablename__: set() for m in MODELS}
+
         # Track IDs of newly inserted records so their children bypass deduplication
         inserted_parent_ids = {model.__tablename__: set() for model in selected_models}
         
@@ -348,6 +356,42 @@ async def import_database(
                         if old_fk_val is not None:
                             if target_table in id_map and old_fk_val in id_map[target_table]:
                                 row[fk_col] = id_map[target_table][old_fk_val]
+
+                # B. Validate Foreign Keys against existing database and newly inserted parent records
+                skip_invalid_fk = False
+                for fk_col, target_table in fks.items():
+                    val = row.get(fk_col)
+                    if val is None:
+                        continue
+                    
+                    # Check if target parent was inserted in this import session
+                    if target_table in inserted_parent_ids and val in inserted_parent_ids[target_table]:
+                        continue
+                    
+                    # Check if target parent exists in DB (using cache)
+                    if val in existing_ids_cache.get(target_table, set()):
+                        continue
+                    
+                    target_model = table_to_model.get(target_table)
+                    exists_in_db = False
+                    if target_model:
+                        exists_in_db = db.query(target_model.id).filter_by(id=val).first() is not None
+                    
+                    if exists_in_db:
+                        if target_table not in existing_ids_cache:
+                            existing_ids_cache[target_table] = set()
+                        existing_ids_cache[target_table].add(val)
+                    else:
+                        col_obj = model.__table__.columns[fk_col]
+                        if not col_obj.nullable:
+                            records_skipped += 1
+                            skip_invalid_fk = True
+                            break
+                        else:
+                            row[fk_col] = None
+
+                if skip_invalid_fk:
+                    continue
 
                 # Only run deduplication logic if we are merging
                 existing = None
@@ -434,4 +478,4 @@ async def import_database(
             db.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail=f"Merge failed, no changes made. Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"{'Merge' if import_type == 'merge' else 'Replace'} failed, no changes made. Error: {str(e)}")

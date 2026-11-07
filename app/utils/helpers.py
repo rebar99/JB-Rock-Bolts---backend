@@ -395,10 +395,32 @@ def recalc_po_delivered_quantities(db: Session, po) -> None:
     po_sale_rows = db.query(Sale.id).filter(Sale.po_id == po.id, Sale.is_deleted == False).all()
     po_sale_ids = [r[0] for r in po_sale_rows]
 
-    # Pre-compute credited qty per item name for this PO's credit notes
-    cn_by_item: dict[str, float] = {}
+    # 1. Map line_item_id -> total credited qty via linked sale items
+    line_credited_map: dict[int, float] = {}
     if po_sale_ids:
-        cn_rows = (
+        rows = (
+            db.query(SaleItem.line_item_id, func.sum(CreditNoteItem.credit_qty))
+            .join(CreditNote, CreditNoteItem.credit_note_id == CreditNote.id)
+            .join(Sale, CreditNote.sale_id == Sale.id)
+            .join(SaleItem, (SaleItem.sale_id == Sale.id) & (SaleItem.item == CreditNoteItem.item))
+            .filter(
+                CreditNote.sale_type == "PO",
+                CreditNote.is_deleted == False,
+                CreditNote.status != "Cancelled",
+                Sale.po_id == po.id,
+                SaleItem.line_item_id.isnot(None),
+            )
+            .group_by(SaleItem.line_item_id)
+            .all()
+        )
+        for lid, qty in rows:
+            line_credited_map[lid] = abs(float(qty or 0))
+
+    # 2. Pool any unlinked credit notes by item name (to handle sales without line_item_id)
+    # without duplicating deductions across multiple lines sharing the same item name.
+    unlinked_credited_by_item: dict[str, float] = {}
+    if po_sale_ids:
+        all_cn_rows = (
             db.query(CreditNoteItem.item, func.sum(CreditNoteItem.credit_qty))
             .join(CreditNote, CreditNoteItem.credit_note_id == CreditNote.id)
             .filter(
@@ -410,8 +432,18 @@ def recalc_po_delivered_quantities(db: Session, po) -> None:
             .group_by(CreditNoteItem.item)
             .all()
         )
-        for item_name, qty in cn_rows:
-            cn_by_item[item_name] = abs(float(qty or 0))
+        assigned_by_item: dict[str, float] = {}
+        for li in po.line_items:
+            assigned = line_credited_map.get(li.id, 0.0)
+            if assigned > 0:
+                norm_name = (li.item or "").strip().lower()
+                assigned_by_item[norm_name] = assigned_by_item.get(norm_name, 0.0) + assigned
+
+        for item_name, total_qty in all_cn_rows:
+            norm_name = (item_name or "").strip().lower()
+            unlinked_qty = max(0.0, abs(float(total_qty or 0)) - assigned_by_item.get(norm_name, 0.0))
+            if unlinked_qty > 0:
+                unlinked_credited_by_item[norm_name] = unlinked_qty
 
     total_all = 0.0
     for li in po.line_items:
@@ -428,10 +460,17 @@ def recalc_po_delivered_quantities(db: Session, po) -> None:
                 SaleItem.line_item_id.is_(None),
                 SaleItem.item.ilike(li.item),
             ).scalar() or 0
-        credited = cn_by_item.get(li.item, 0.0)
-        li.delivered_quantity = round(max(0, float(by_id) + float(by_name) - credited), 2)
+        
+        credited = line_credited_map.get(li.id, 0.0)
+        norm_name = (li.item or "").strip().lower()
+        if unlinked_credited_by_item.get(norm_name, 0.0) > 0:
+            take = min(unlinked_credited_by_item[norm_name], max(0.0, float(by_id) + float(by_name) - credited))
+            credited += take
+            unlinked_credited_by_item[norm_name] -= take
+
+        li.delivered_quantity = round(max(0.0, float(by_id) + float(by_name) - credited), 2)
         total_all += li.delivered_quantity
-    po.delivered_quantity = round(max(0, total_all), 2)
+    po.delivered_quantity = round(max(0.0, total_all), 2)
 
 
 def recalc_wo_completed_quantities(db: Session, wo) -> None:
@@ -455,10 +494,31 @@ def recalc_wo_completed_quantities(db: Session, wo) -> None:
     # Only count non-deleted WO sales
     wo_sale_ids = [s.id for s in wo.work_order_sales if not getattr(s, 'is_deleted', False)]
 
-    # Pre-compute credited qty per item name for this WO's credit notes
-    cn_by_item: dict[str, float] = {}
+    # 1. Map line_item_id -> total credited qty via linked sale items
+    line_credited_map: dict[int, float] = {}
     if wo_sale_ids:
-        cn_rows = (
+        rows = (
+            db.query(WorkOrderSaleItem.line_item_id, func.sum(CreditNoteItem.credit_qty))
+            .join(CreditNote, CreditNoteItem.credit_note_id == CreditNote.id)
+            .join(WorkOrderSale, CreditNote.wo_sale_id == WorkOrderSale.id)
+            .join(WorkOrderSaleItem, (WorkOrderSaleItem.sale_id == WorkOrderSale.id) & (WorkOrderSaleItem.item == CreditNoteItem.item))
+            .filter(
+                CreditNote.sale_type == "WO",
+                CreditNote.is_deleted == False,
+                CreditNote.status != "Cancelled",
+                WorkOrderSale.wo_id == wo.id,
+                WorkOrderSaleItem.line_item_id.isnot(None),
+            )
+            .group_by(WorkOrderSaleItem.line_item_id)
+            .all()
+        )
+        for lid, qty in rows:
+            line_credited_map[lid] = abs(float(qty or 0))
+
+    # 2. Pool any unlinked credit notes by item name
+    unlinked_credited_by_item: dict[str, float] = {}
+    if wo_sale_ids:
+        all_cn_rows = (
             db.query(CreditNoteItem.item, func.sum(CreditNoteItem.credit_qty))
             .join(CreditNote, CreditNoteItem.credit_note_id == CreditNote.id)
             .filter(
@@ -470,8 +530,18 @@ def recalc_wo_completed_quantities(db: Session, wo) -> None:
             .group_by(CreditNoteItem.item)
             .all()
         )
-        for item_name, qty in cn_rows:
-            cn_by_item[item_name] = abs(float(qty or 0))
+        assigned_by_item: dict[str, float] = {}
+        for li in wo.line_items:
+            assigned = line_credited_map.get(li.id, 0.0)
+            if assigned > 0:
+                norm_name = (li.item or "").strip().lower()
+                assigned_by_item[norm_name] = assigned_by_item.get(norm_name, 0.0) + assigned
+
+        for item_name, total_qty in all_cn_rows:
+            norm_name = (item_name or "").strip().lower()
+            unlinked_qty = max(0.0, abs(float(total_qty or 0)) - assigned_by_item.get(norm_name, 0.0))
+            if unlinked_qty > 0:
+                unlinked_credited_by_item[norm_name] = unlinked_qty
 
     total_all = 0.0
     for li in wo.line_items:
@@ -488,8 +558,14 @@ def recalc_wo_completed_quantities(db: Session, wo) -> None:
                 WorkOrderSaleItem.line_item_id.is_(None),
                 WorkOrderSaleItem.item.ilike(li.item),
             ).scalar() or 0
-        credited = cn_by_item.get(li.item, 0.0)
-        li.completed_quantity = round(max(0, float(by_id) + float(by_name) - credited), 10)
+        credited = line_credited_map.get(li.id, 0.0)
+        norm_name = (li.item or "").strip().lower()
+        if unlinked_credited_by_item.get(norm_name, 0.0) > 0:
+            take = min(unlinked_credited_by_item[norm_name], max(0.0, float(by_id) + float(by_name) - credited))
+            credited += take
+            unlinked_credited_by_item[norm_name] -= take
+
+        li.completed_quantity = round(max(0.0, float(by_id) + float(by_name) - credited), 10)
         total_all += li.completed_quantity
 
 
