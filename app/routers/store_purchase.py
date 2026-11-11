@@ -8097,14 +8097,10 @@ def create_order(payload: OrderPayload, user: User = Depends(store_admin), db: S
 
 
 
-    if db.query(StorePurchaseOrder).filter_by(order_number=payload.order_number).first():
-
-
-
-
-
-
-
+    if db.query(StorePurchaseOrder).filter(
+            StorePurchaseOrder.order_number == payload.order_number,
+            StorePurchaseOrder.is_deleted != True
+    ).first():
         raise HTTPException(status_code=409, detail="Order number already exists.")
 
 
@@ -8781,14 +8777,11 @@ def update_order(order_id: int, payload: OrderPayload, user: User = Depends(stor
 
 
 
-    if payload.order_number.strip() != order.order_number and db.query(StorePurchaseOrder).filter(StorePurchaseOrder.order_number == payload.order_number.strip(), StorePurchaseOrder.id != order_id).first():
-
-
-
-
-
-
-
+    if payload.order_number.strip() != order.order_number and db.query(StorePurchaseOrder).filter(
+            StorePurchaseOrder.order_number == payload.order_number.strip(),
+            StorePurchaseOrder.id != order_id,
+            StorePurchaseOrder.is_deleted != True
+    ).first():
         raise HTTPException(status_code=409, detail="Order number already exists.")
 
 
