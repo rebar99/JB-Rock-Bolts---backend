@@ -291,6 +291,8 @@ async def import_database(
         # Temporarily disable foreign key checks for clean bulk replacement/merging
         try:
             db.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
+            # Increase lock wait timeout to avoid 'Lock wait timeout exceeded' errors
+            db.execute(text("SET innodb_lock_wait_timeout = 120;"))
         except Exception:
             pass
 
@@ -299,12 +301,18 @@ async def import_database(
             if effective_scope == "store":
                 # Only clear Store tables - Marketing & Users remain 100% untouched!
                 for model in reversed(STORE_MODELS):
-                    db.query(model).delete(synchronize_session=False)
+                    try:
+                        db.execute(text(f"TRUNCATE TABLE `{model.__tablename__}`;"))
+                    except Exception:
+                        db.query(model).delete(synchronize_session=False)
                 db.commit()
             elif effective_scope == "marketing":
                 # Only clear Marketing tables - Store & Users remain 100% untouched!
                 for model in reversed(MARKETING_MODELS):
-                    db.query(model).delete(synchronize_session=False)
+                    try:
+                        db.execute(text(f"TRUNCATE TABLE `{model.__tablename__}`;"))
+                    except Exception:
+                        db.query(model).delete(synchronize_session=False)
                 db.commit()
             else:
                 for model in reversed(MODELS):
@@ -312,7 +320,10 @@ async def import_database(
                         continue
                     if model.__tablename__ == "applications" and "applications" not in backup_data:
                         continue
-                    db.query(model).delete(synchronize_session=False)
+                    try:
+                        db.execute(text(f"TRUNCATE TABLE `{model.__tablename__}`;"))
+                    except Exception:
+                        db.query(model).delete(synchronize_session=False)
                 db.commit()
             
         try:
