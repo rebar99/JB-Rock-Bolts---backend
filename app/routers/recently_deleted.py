@@ -10,7 +10,7 @@ from pydantic import BaseModel
 import os
 
 from app.database import get_db
-from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale, CreditNote, StorePurchaseOrder, StorePONotification, StorePurchaseStockTransaction
+from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale, CreditNote, StorePurchaseOrder, StorePONotification, StorePurchaseStockTransaction, StorePurchaseMaterialReceipt, StorePurchaseStockItem, StorePurchaseItem
 from app.utils.auth import require_admin
 from app.utils.helpers import log_activity, recalc_po_delivered_quantities, recalc_wo_completed_quantities
 
@@ -50,6 +50,9 @@ def _build_record(record_type, obj):
     elif record_type == "store_purchase_order":
         number = obj.order_number
         party_name = obj.supplier or "Store Supplier"
+    elif record_type == "store_material_receipt":
+        number = obj.invoice_number or f"Receipt #{obj.id}"
+        party_name = obj.vendor_name or "Store Vendor"
     elif record_type == "work_order":
         number = obj.wo_number
         party_name = obj.client_name
@@ -120,6 +123,18 @@ def list_recently_deleted(
         )
         for spo in store_pos:
             records.append(_build_record("store_purchase_order", spo))
+
+    # Material Receipts (Store workspace only)
+    receipt_module_match = module in (None, "all", "store_material_receipt")
+    if include_store and receipt_module_match:
+        receipts = (
+            db.query(StorePurchaseMaterialReceipt)
+            .filter(StorePurchaseMaterialReceipt.is_deleted == True, StorePurchaseMaterialReceipt.permanent_delete_at > now)
+            .order_by(StorePurchaseMaterialReceipt.deleted_at.desc())
+            .all()
+        )
+        for r in receipts:
+            records.append(_build_record("store_material_receipt", r))
 
     if include_marketing and module in (None, "all", "work_order"):
         wos = (
@@ -223,6 +238,43 @@ def restore_record(
             f"Restored Store PO {obj.order_number} from Recently Deleted.",
             user.name, obj.id, entity_name=obj.order_number, workspace="Store")
         return _build_record("store_purchase_order", obj)
+
+    elif record_type == "store_material_receipt":
+        from datetime import timedelta
+        from app.utils.helpers import log_activity as _log
+        obj = db.query(StorePurchaseMaterialReceipt).filter(
+            StorePurchaseMaterialReceipt.id == record_id,
+            StorePurchaseMaterialReceipt.is_deleted == True
+        ).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Deleted Material Receipt not found.")
+        if obj.permanent_delete_at and obj.permanent_delete_at < now:
+            raise HTTPException(status_code=410, detail="Material Receipt has already expired.")
+        # Restore: re-post inventory transactions
+        from app.routers.store_purchase import _record_receipt, _inventory_group_and_item, _refresh_po_received_status
+        obj.is_deleted = False
+        obj.deleted_at = None
+        obj.deleted_by = None
+        obj.permanent_delete_at = None
+        db.flush()
+        # Re-add inventory postings for each receipt line
+        for line in obj.lines:
+            if (line.received_quantity or 0) > 0:
+                group_name, item_name = _inventory_group_and_item(db, line.item_description)
+                _record_receipt(
+                    db, name=group_name, stock_item=item_name,
+                    quantity=line.received_quantity, rate=line.unit_rate,
+                    vendor_name=obj.vendor_name, reference_no=obj.order.order_number,
+                    receipt_date=obj.invoice_date, uom=line.uom,
+                    user_name=user.name, receipt_line_id=line.id,
+                )
+        _refresh_po_received_status(db, obj.order)
+        db.commit()
+        db.refresh(obj)
+        log_activity(db, "Material Receipt Restored", "StorePurchaseOrder",
+            f"Restored Material Receipt (Invoice: {obj.invoice_number}) from Recently Deleted.",
+            user.name, obj.order_id, entity_name=obj.invoice_number, workspace="Store")
+        return _build_record("store_material_receipt", obj)
 
     elif record_type == "work_order":
         obj = db.query(WorkOrder).filter(WorkOrder.id == record_id, WorkOrder.is_deleted == True).first()
@@ -347,6 +399,24 @@ def permanent_delete_record(
         db.commit()
         log_activity(db, "Store PO Permanently Deleted", "StorePurchaseOrder",
             f"Admin permanently deleted Store PO {label}.", user.name, record_id, entity_name=label, workspace="Store")
+
+    elif record_type == "store_material_receipt":
+        obj = db.query(StorePurchaseMaterialReceipt).filter(
+            StorePurchaseMaterialReceipt.id == record_id,
+            StorePurchaseMaterialReceipt.is_deleted == True
+        ).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Deleted Material Receipt not found.")
+        label = obj.invoice_number or f"Receipt #{obj.id}"
+        line_ids = [line.id for line in (obj.lines or [])]
+        if line_ids:
+            db.query(StorePurchaseStockTransaction).filter(
+                StorePurchaseStockTransaction.receipt_line_id.in_(line_ids)
+            ).update({StorePurchaseStockTransaction.receipt_line_id: None}, synchronize_session=False)
+        db.delete(obj)
+        db.commit()
+        log_activity(db, "Material Receipt Permanently Deleted", "StorePurchaseOrder",
+            f"Admin permanently deleted Material Receipt {label}.", user.name, record_id, entity_name=label, workspace="Store")
 
     elif record_type == "work_order":
         obj = db.query(WorkOrder).filter(WorkOrder.id == record_id, WorkOrder.is_deleted == True).first()

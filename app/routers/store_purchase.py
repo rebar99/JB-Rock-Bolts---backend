@@ -1578,7 +1578,7 @@ def _refresh_po_received_status(db: Session, order: StorePurchaseOrder):
 
 
 
-        .filter(StorePurchaseMaterialReceipt.order_id == order.id)
+        .filter(StorePurchaseMaterialReceipt.order_id == order.id, StorePurchaseMaterialReceipt.is_deleted == False)
 
 
 
@@ -7214,7 +7214,7 @@ def material_receipts(_: User = Depends(store_user), db: Session = Depends(get_d
 
 
 
-    records = db.query(StorePurchaseMaterialReceipt).order_by(StorePurchaseMaterialReceipt.created_at.desc()).all()
+    records = db.query(StorePurchaseMaterialReceipt).filter(StorePurchaseMaterialReceipt.is_deleted == False).order_by(StorePurchaseMaterialReceipt.created_at.desc()).all()
 
 
 
@@ -7978,66 +7978,19 @@ def update_material_receipt(receipt_id: int, payload: MaterialReceiptPayload, us
 
 
 @router.delete("/materials-received/{receipt_id}")
-
-
-
-
-
-
-
-def delete_material_receipt(receipt_id: int, _: User = Depends(store_admin), db: Session = Depends(get_db)):
-
-
-
-
-
-
-
+def delete_material_receipt(receipt_id: int, user: User = Depends(store_admin), db: Session = Depends(get_db)):
     receipt = db.get(StorePurchaseMaterialReceipt, receipt_id)
-
-
-
-
-
-
-
     if not receipt:
-
-
-
-
-
-
-
         raise HTTPException(status_code=404, detail="Material receipt not found.")
-
-
-
-
-
-
 
     receipt_line_ids = [line.id for line in receipt.lines]
 
-
-
-
-
-
-
-    # Reverse inventory postings linked to this receipt before deleting
-
+    # Reverse inventory postings linked to this receipt
     if receipt_line_ids:
-
         from datetime import date as _date
-
         txs = db.query(StorePurchaseStockTransaction).filter(
-
             StorePurchaseStockTransaction.receipt_line_id.in_(receipt_line_ids)
-
         ).all()
-
-
 
         for tx in txs:
             # Reverse on StorePurchaseItem
@@ -8056,14 +8009,12 @@ def delete_material_receipt(receipt_id: int, _: User = Depends(store_admin), db:
                     getattr(item, 'out_of_stock_limit', 0.0),
                     getattr(item, 'reorder_level', 0.0)
                 )
-                # If item has 0 quantity, reset rate and clear deleted PO reference
                 if item.quantity <= 0:
                     item.rate = 0.0
                     if item.reference_no and tx.reference_no and item.reference_no == tx.reference_no:
                         item.reference_no = None
                         item.vendor_name = None
                 else:
-                    # If remaining quantity > 0, revert rate to previous receipt
                     rem_tx = db.query(StorePurchaseStockTransaction).filter(
                         StorePurchaseStockTransaction.item_id == item.id,
                         StorePurchaseStockTransaction.id != tx.id,
@@ -8074,11 +8025,9 @@ def delete_material_receipt(receipt_id: int, _: User = Depends(store_admin), db:
                         item.vendor_name = rem_tx.vendor_name
                         item.reference_no = rem_tx.reference_no
 
-            # Reverse on StorePurchaseStockItem (find by material_id)
             stock_items = db.query(StorePurchaseStockItem).filter(
                 StorePurchaseStockItem.material_id == tx.item_id
             ).all()
-
             if len(stock_items) == 1:
                 si = stock_items[0]
                 si.total_received_quantity = max(0.0, float(si.total_received_quantity or 0) - float(tx.quantity or 0))
@@ -8105,10 +8054,18 @@ def delete_material_receipt(receipt_id: int, _: User = Depends(store_admin), db:
 
         db.flush()
 
-    # Delete only the material receipt; retain the Purchase Order intact
-    db.delete(receipt)
+    # Soft-delete: move to Recently Deleted for 24 hours
+    now = datetime.utcnow()
+    receipt.is_deleted = True
+    receipt.deleted_at = now
+    receipt.deleted_by = user.name
+    receipt.permanent_delete_at = now + timedelta(hours=24)
+    _refresh_po_received_status(db, receipt.order)
     db.commit()
-    return {"message": "Material receipt deleted successfully."}
+    log_activity(db, "Material Receipt Deleted", "StorePurchaseOrder",
+        f"Material Receipt (Invoice: {receipt.invoice_number}) soft-deleted. Will be purged in 24 hours.",
+        user.name, receipt.order_id, entity_name=receipt.invoice_number, workspace="Store")
+    return {"message": "Material receipt moved to Recently Deleted. It will be permanently removed after 24 hours."}
 
 
 
@@ -10018,7 +9975,7 @@ def _order_response(order: StorePurchaseOrder, db=None):
 
 
         "signature_config": _build_signature_config(order, db or session),
-        "material_receipts": [_material_receipt_response(r) for r in sorted(order.material_receipts or [], key=lambda x: str(x.invoice_date or x.created_at or ""), reverse=True)],
+        "material_receipts": [_material_receipt_response(r) for r in sorted([mr for mr in (order.material_receipts or []) if not mr.is_deleted], key=lambda x: str(x.invoice_date or x.created_at or ""), reverse=True)],
 
 
 

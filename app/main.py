@@ -552,6 +552,21 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         pass
 
+            # Soft-delete columns for store_purchase_material_receipts
+            for col, dtype in [
+                ("is_deleted", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("deleted_at", "DATETIME NULL"),
+                ("deleted_by", "VARCHAR(100) NULL"),
+                ("permanent_delete_at", "DATETIME NULL"),
+            ]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM store_purchase_material_receipts LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE store_purchase_material_receipts ADD COLUMN {col} {dtype}"))
+                    except Exception:
+                        pass
+
             # ── PO Approval Level signature columns ─────────────────────────────
             for col, dtype in [
                 ("checked_by_user_id",       "INT NULL"),
@@ -682,7 +697,7 @@ async def lifespan(app: FastAPI):
     def purge_expired_deleted_records():
         """Har 1 ghante mein check karo — jis record ka permanent_delete_at past mein
         aa gaya, usse permanently delete karo (including associated files)."""
-        from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale, CreditNote, StorePurchaseOrder
+        from app.models.models import Sale, PurchaseOrder, WorkOrder, WorkOrderSale, CreditNote, StorePurchaseOrder, StorePurchaseMaterialReceipt
         db_purge = SessionLocal()
         try:
             now_naive = datetime.utcnow()
@@ -783,8 +798,18 @@ async def lifespan(app: FastAPI):
                 db_purge.delete(spo)
             db_purge.flush()
 
+            # Purge expired Material Receipts
+            expired_receipts = db_purge.query(StorePurchaseMaterialReceipt).filter(
+                StorePurchaseMaterialReceipt.is_deleted == True,
+                StorePurchaseMaterialReceipt.permanent_delete_at <= now_naive,
+            ).all()
+            for rcpt in expired_receipts:
+                logger.info(f"[AutoPurge] Permanently deleting Material Receipt id={rcpt.id} invoice={rcpt.invoice_number}")
+                db_purge.delete(rcpt)
+            db_purge.flush()
+
             db_purge.commit()
-            total = len(expired_sales) + len(expired_pos) + len(expired_wos) + len(expired_wo_sales) + len(expired_credit_notes) + len(expired_store_pos)
+            total = len(expired_sales) + len(expired_pos) + len(expired_wos) + len(expired_wo_sales) + len(expired_credit_notes) + len(expired_store_pos) + len(expired_receipts)
             if total:
                 logger.info(f"[AutoPurge] Purged {total} expired soft-deleted record(s).")
         except Exception as ex:

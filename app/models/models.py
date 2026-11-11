@@ -387,6 +387,12 @@ class StorePurchaseMaterialReceipt(Base):
     payment_date = Column(Date, nullable=True)
     payment_reference = Column(String(200), nullable=True)
 
+    # Soft-delete fields
+    is_deleted = Column(Boolean, default=False, nullable=False, server_default="0")
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_by = Column(String(100), nullable=True)
+    permanent_delete_at = Column(DateTime, nullable=True)
+
     order = relationship("StorePurchaseOrder", back_populates="material_receipts")
     lines = relationship("StorePurchaseMaterialReceiptLine", back_populates="receipt", cascade="all, delete-orphan", order_by="StorePurchaseMaterialReceiptLine.line_number")
 
