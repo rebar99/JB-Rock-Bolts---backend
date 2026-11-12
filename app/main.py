@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     logger.info("All tables created/verified.")
 
-    from sqlalchemy import text
+    from sqlalchemy import inspect, text
     try:
         with engine.begin() as conn:
             # Safely migrate purchase_orders.client_id
@@ -645,6 +645,22 @@ async def lifespan(app: FastAPI):
 
     except Exception as e:
         logger.error(f"Error applying schema updates: {e}")
+
+    # This field is required by the Store PO ORM query. Some hosts suppress
+    # failures from the general best-effort migration block above, so verify
+    # it independently before serving requests.
+    try:
+        with engine.begin() as conn:
+            columns = {column["name"] for column in inspect(conn).get_columns("store_purchase_order_details")}
+            if "freight_gst_type" not in columns:
+                conn.execute(text(
+                    "ALTER TABLE store_purchase_order_details "
+                    "ADD COLUMN freight_gst_type VARCHAR(20) NOT NULL DEFAULT 'With GST'"
+                ))
+                logger.info("[Migration] Added store_purchase_order_details.freight_gst_type")
+    except Exception:
+        logger.exception("Could not ensure store PO freight GST schema; API startup aborted.")
+        raise
 
 
     db = SessionLocal()
