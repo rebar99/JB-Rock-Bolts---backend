@@ -891,6 +891,7 @@ async def enforce_marketing_application_access(request, call_next):
     )
     public_or_non_marketing = (
         not path.startswith("/api/")
+        or path.startswith("/api/uploads")
         or path.startswith("/api/users/")
         or path == "/api/users"
         or path.startswith("/api/application-access")
