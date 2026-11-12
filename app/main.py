@@ -527,8 +527,8 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         pass
 
-            # Add remark_1 and remark_2 to store_purchase_order_details
-            for col, dtype in [("remark_1", "TEXT NULL"), ("remark_2", "TEXT NULL"), ("freight_gst_type", "VARCHAR(20) NOT NULL DEFAULT 'With GST'")]:
+            # Add remark_1, remark_2, freight_charges and freight_gst_type to store_purchase_order_details
+            for col, dtype in [("remark_1", "TEXT NULL"), ("remark_2", "TEXT NULL"), ("freight_charges", "FLOAT NOT NULL DEFAULT 0"), ("freight_gst_type", "VARCHAR(20) NOT NULL DEFAULT 'With GST'")]:
                 try:
                     conn.execute(text(f"SELECT {col} FROM store_purchase_order_details LIMIT 1"))
                 except Exception:
@@ -646,12 +646,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error applying schema updates: {e}")
 
-    # This field is required by the Store PO ORM query. Some hosts suppress
+    # These fields are required by the Store PO ORM query. Some hosts suppress
     # failures from the general best-effort migration block above, so verify
-    # it independently before serving requests.
+    # them independently before serving requests.
     try:
         with engine.begin() as conn:
             columns = {column["name"] for column in inspect(conn).get_columns("store_purchase_order_details")}
+            if "freight_charges" not in columns:
+                conn.execute(text(
+                    "ALTER TABLE store_purchase_order_details "
+                    "ADD COLUMN freight_charges FLOAT NOT NULL DEFAULT 0"
+                ))
+                logger.info("[Migration] Added store_purchase_order_details.freight_charges")
             if "freight_gst_type" not in columns:
                 conn.execute(text(
                     "ALTER TABLE store_purchase_order_details "
