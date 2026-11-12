@@ -1,5 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 from fastapi.staticfiles import StaticFiles
 import asyncio
@@ -937,6 +938,67 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Smart file serving route with automatic fallback to alternative server folders
+@app.get("/api/uploads/{file_name:path}")
+@app.get("/uploads/{file_name:path}")
+async def serve_uploaded_file(file_name: str):
+    clean_name = file_name.lstrip("/").replace("\\", "/")
+    # 1. Primary UPLOAD_DIR
+    target = os.path.abspath(os.path.join(UPLOAD_DIR, clean_name))
+    if os.path.isfile(target):
+        return FileResponse(target)
+
+    # 2. Check candidate fallback directories where uploads may have landed earlier
+    candidate_dirs = [
+        UPLOAD_DIR,
+        os.path.join(os.getcwd(), "uploads"),
+        os.path.join(BASE_DIR, "app", "uploads"),
+        os.path.join(os.path.dirname(BASE_DIR), "uploads"),
+        "/var/www/uploads",
+        "/var/www/marketing/uploads",
+        "/var/www/marketing/JB-Rock-Bolts---backend/uploads",
+        "/root/uploads",
+    ]
+    for cdir in candidate_dirs:
+        try:
+            cand = os.path.abspath(os.path.join(cdir, clean_name))
+            if os.path.isfile(cand):
+                try:
+                    import shutil
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    shutil.copy2(cand, target)
+                except Exception:
+                    pass
+                return FileResponse(cand)
+        except Exception:
+            continue
+
+    # 3. Search directory tree by filename
+    base_name = os.path.basename(clean_name)
+    try:
+        search_roots = [BASE_DIR, os.path.dirname(BASE_DIR), os.getcwd()]
+        for sroot in search_roots:
+            if not os.path.isdir(sroot):
+                continue
+            for root, _, files in os.walk(sroot):
+                if base_name in files:
+                    found = os.path.join(root, base_name)
+                    if os.path.isfile(found):
+                        try:
+                            import shutil
+                            os.makedirs(os.path.dirname(target), exist_ok=True)
+                            shutil.copy2(found, target)
+                        except Exception:
+                            pass
+                        return FileResponse(found)
+    except Exception:
+        pass
+
+    raise HTTPException(
+        status_code=404,
+        detail="File not found on server. Yeh file server disk par maujood nahi hai. Kripya is delivery challan ko dubara upload karein."
+    )
 
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 app.mount("/api/uploads", StaticFiles(directory=UPLOAD_DIR), name="api_uploads")
