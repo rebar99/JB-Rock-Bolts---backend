@@ -528,7 +528,7 @@ async def lifespan(app: FastAPI):
                         pass
 
             # Add remark_1 and remark_2 to store_purchase_order_details
-            for col, dtype in [("remark_1", "TEXT NULL"), ("remark_2", "TEXT NULL")]:
+            for col, dtype in [("remark_1", "TEXT NULL"), ("remark_2", "TEXT NULL"), ("freight_gst_type", "VARCHAR(20) NOT NULL DEFAULT 'With GST'")]:
                 try:
                     conn.execute(text(f"SELECT {col} FROM store_purchase_order_details LIMIT 1"))
                 except Exception:

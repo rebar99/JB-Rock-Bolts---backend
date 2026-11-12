@@ -30,7 +30,7 @@ def create_database_if_not_exists():
 
 engine = create_engine(
     settings.DATABASE_URL,
-    echo=settings.DEBUG,
+    echo=False,  # was settings.DEBUG — echo causes massive slowdown with large datasets
     pool_pre_ping=True,
     pool_recycle=3600,
     pool_size=10,

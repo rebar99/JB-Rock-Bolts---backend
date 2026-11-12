@@ -1843,6 +1843,8 @@ class OrderPayload(BaseModel):
 
 
     round_off: float = 0
+    freight_charges: float = 0
+    freight_gst_type: str = "With GST"
 
 
 
@@ -8125,7 +8127,9 @@ def create_order(payload: OrderPayload, user: User = Depends(store_admin), db: S
 
 
 
-    grand_total = round(subtotal + gst_amount + payload.round_off, 2)
+    freight_charges = round(float(payload.freight_charges or 0), 2)
+    freight_gst = round(freight_charges * payload.gst_rate / 100, 2) if payload.freight_gst_type == "With GST" else 0
+    grand_total = round(subtotal + gst_amount + freight_charges + freight_gst + payload.round_off, 2)
 
 
 
@@ -8846,7 +8850,7 @@ def update_order(order_id: int, payload: OrderPayload, user: User = Depends(stor
 
 
 
-    detail.subtotal = subtotal; detail.gst_amount = gst_amount; detail.grand_total = round(subtotal + gst_amount + payload.round_off, 2)
+    detail.subtotal = subtotal; detail.gst_amount = gst_amount; detail.freight_charges = round(float(payload.freight_charges or 0), 2); freight_gst = round(detail.freight_charges * payload.gst_rate / 100, 2) if payload.freight_gst_type == "With GST" else 0; detail.grand_total = round(subtotal + gst_amount + detail.freight_charges + freight_gst + payload.round_off, 2)
 
 
 
@@ -9836,6 +9840,15 @@ def _order_response(order: StorePurchaseOrder, db=None):
 
 
         "round_off": detail.round_off if detail else 0,
+
+
+
+
+
+
+
+        "freight_charges": getattr(detail, 'freight_charges', 0) if detail else 0,
+        "freight_gst_type": getattr(detail, 'freight_gst_type', 'With GST') if detail else 'With GST',
 
 
 

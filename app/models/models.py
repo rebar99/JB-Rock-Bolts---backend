@@ -332,6 +332,8 @@ class StorePurchaseOrderDetail(Base):
     subtotal = Column(Float, nullable=False, default=0)
     gst_amount = Column(Float, nullable=False, default=0)
     round_off = Column(Float, nullable=False, default=0)
+    freight_charges = Column(Float, nullable=False, default=0, server_default="0")
+    freight_gst_type = Column(String(20), nullable=False, default="With GST", server_default="With GST")
     grand_total = Column(Float, nullable=False, default=0)
     price_basis = Column(String(300), nullable=True)
     packing_terms = Column(String(300), nullable=True)
