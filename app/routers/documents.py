@@ -1611,3 +1611,249 @@ def _fy_label(dt) -> str:
     m = dt.month
     fy_start = y if m >= 4 else y - 1
     return f"{fy_start}-{str(fy_start + 1)[2:]}"
+
+
+def generate_delivery_challan_html(sale, is_wo: bool = False) -> str:
+    """Render an authentic, printable Delivery Challan for a Sale or WorkOrderSale."""
+    challan_no = getattr(sale, "invoice_number", None) or f"DC-{sale.id}"
+    challan_date = _fmt_date(getattr(sale, "invoice_date", None) or getattr(sale, "created_at", None))
+    po_no = (getattr(sale, "wo_number", None) if is_wo else getattr(sale, "po_number", None)) or "—"
+    client_name = getattr(sale, "client_name", None) or "—"
+    project = getattr(sale, "project", None) or "—"
+    dispatched_through = getattr(sale, "dispatched_through", None) or "—"
+    ship_to = (getattr(sale, "ship_to", None) or client_name).replace("\n", "<br/>")
+    bill_to = (getattr(sale, "bill_to", None) or client_name).replace("\n", "<br/>")
+    dispatch_from = (getattr(sale, "dispatch_from", None) or f"{SELLER['name']}<br/>{SELLER['address1']}, {SELLER['address2']}").replace("\n", "<br/>")
+
+    items_rows = ""
+    total_qty = 0
+    items = getattr(sale, "items", []) or []
+    for idx, it in enumerate(items, 1):
+        qty = float(getattr(it, "quantity", 0) or 0)
+        total_qty += qty
+        uom = getattr(it, "uom", "Nos")
+        name = getattr(it, "item", "Item")
+        items_rows += f"""
+        <tr>
+          <td style="text-align:center;border:1px solid #333;padding:8px 6px;">{idx}</td>
+          <td style="border:1px solid #333;padding:8px 10px;font-weight:600;">{name}</td>
+          <td style="text-align:center;border:1px solid #333;padding:8px 6px;">{uom}</td>
+          <td style="text-align:right;border:1px solid #333;padding:8px 10px;font-weight:700;">{qty:g}</td>
+          <td style="border:1px solid #333;padding:8px 6px;text-align:center;">Good Condition</td>
+        </tr>
+        """
+
+    if not items_rows:
+        items_rows = """<tr><td colspan="5" style="text-align:center;padding:12px;border:1px solid #333;">Dispatched Material as per Order</td></tr>"""
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Delivery Challan – {challan_no}</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: 'Segoe UI', Arial, sans-serif;
+      font-size: 12px;
+      color: #111;
+      background: #f8fafc;
+      padding: 20px;
+    }}
+    .sheet {{
+      background: #fff;
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 30px 36px;
+      border: 1px solid #cbd5e1;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+      border-radius: 4px;
+    }}
+    .print-bar {{
+      max-width: 860px;
+      margin: 0 auto 16px auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #1e293b;
+      color: #fff;
+      padding: 10px 18px;
+      border-radius: 6px;
+    }}
+    .print-btn {{
+      background: #0284c7;
+      color: #fff;
+      border: none;
+      padding: 8px 18px;
+      font-weight: 600;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+    }}
+    .print-btn:hover {{ background: #0369a1; }}
+    .header-table {{
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 12px;
+    }}
+    .doc-title {{
+      text-align: center;
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: 1px;
+      color: #0f172a;
+      padding: 6px 0;
+      border-top: 2px solid #0f172a;
+      border-bottom: 2px solid #0f172a;
+      margin: 12px 0 16px 0;
+      background: #f1f5f9;
+    }}
+    .info-box {{
+      width: 100%;
+      border: 1px solid #333;
+      border-collapse: collapse;
+      margin-bottom: 14px;
+    }}
+    .info-box td {{
+      border: 1px solid #333;
+      padding: 8px 10px;
+      vertical-align: top;
+      font-size: 11.5px;
+      line-height: 1.5;
+    }}
+    .items-table {{
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      margin-bottom: 16px;
+    }}
+    .items-table th {{
+      background: #e2e8f0;
+      border: 1px solid #333;
+      padding: 8px 6px;
+      font-size: 11.5px;
+      font-weight: 700;
+      text-align: center;
+    }}
+    .sign-box {{
+      width: 100%;
+      border: 1px solid #333;
+      border-collapse: collapse;
+      margin-top: 24px;
+    }}
+    .sign-box td {{
+      border: 1px solid #333;
+      padding: 12px;
+      width: 33.33%;
+      vertical-align: bottom;
+      height: 90px;
+      font-size: 11px;
+      text-align: center;
+    }}
+    @media print {{
+      body {{ background: #fff; padding: 0; }}
+      .sheet {{ border: none; box-shadow: none; padding: 10px; }}
+      .no-print {{ display: none !important; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="print-bar no-print">
+    <div><strong>Delivery Challan Viewer</strong> — Verified System Document</div>
+    <button class="print-btn" onclick="window.print()">🖨️ Print Delivery Challan</button>
+  </div>
+
+  <div class="sheet">
+    <table class="header-table">
+      <tr>
+        <td style="vertical-align:top;width:60%;">
+          <div style="font-size:18px;font-weight:800;color:#0f172a;">{SELLER['name']}</div>
+          <div style="font-size:11px;color:#475569;margin-top:3px;line-height:1.4;">
+            {SELLER['address1']}<br/>
+            {SELLER['address2']}<br/>
+            Contact: {SELLER['contact']} | Email: {SELLER['email']}
+          </div>
+        </td>
+        <td style="text-align:right;vertical-align:top;width:40%;">
+          <div style="font-size:13px;font-weight:700;">ORIGINAL FOR RECIPIENT</div>
+          <div style="font-size:11px;color:#475569;margin-top:4px;">GSTIN: 02AAFCR5621L1ZG</div>
+        </td>
+      </tr>
+    </table>
+
+    <div class="doc-title">DELIVERY CHALLAN</div>
+
+    <table class="info-box">
+      <tr>
+        <td style="width:50%;">
+          <strong>Challan / Invoice No:</strong> {challan_no}<br/>
+          <strong>Challan Date:</strong> {challan_date}<br/>
+          <strong>PO / WO No:</strong> {po_no}
+        </td>
+        <td style="width:50%;">
+          <strong>Dispatched Through:</strong> {dispatched_through}<br/>
+          <strong>Project:</strong> {project}
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <strong style="text-decoration:underline;">Consignee (Ship To):</strong><br/>
+          <div style="margin-top:4px;">{ship_to}</div>
+        </td>
+        <td>
+          <strong style="text-decoration:underline;">Buyer (Bill To):</strong><br/>
+          <div style="margin-top:4px;">{bill_to}</div>
+        </td>
+      </tr>
+    </table>
+
+    <table class="items-table">
+      <thead>
+        <tr>
+          <th style="width:40px;">S.No.</th>
+          <th>Description of Goods / Material</th>
+          <th style="width:70px;">UOM</th>
+          <th style="width:100px;">Dispatched Qty</th>
+          <th style="width:110px;">Remarks</th>
+        </tr>
+      </thead>
+      <tbody>
+        {items_rows}
+      </tbody>
+      <tfoot>
+        <tr style="background:#f8fafc;font-weight:700;">
+          <td colspan="3" style="text-align:right;border:1px solid #333;padding:8px 10px;">Total Dispatched Quantity:</td>
+          <td style="text-align:right;border:1px solid #333;padding:8px 10px;">{total_qty:g}</td>
+          <td style="border:1px solid #333;"></td>
+        </tr>
+      </tfoot>
+    </table>
+
+    <div style="font-size:10.5px;color:#475569;margin-top:8px;line-height:1.5;">
+      <strong>Terms & Conditions:</strong><br/>
+      1. Goods received in good order and condition as per specifications.<br/>
+      2. Any discrepancies must be notified within 24 hours of delivery.
+    </div>
+
+    <table class="sign-box">
+      <tr>
+        <td>
+          <div style="border-top:1px dashed #666;padding-top:4px;">Driver's Signature / Transporter</div>
+        </td>
+        <td>
+          <div style="border-top:1px dashed #666;padding-top:4px;">Receiver's Signature & Stamp</div>
+        </td>
+        <td>
+          <div>for <strong>{SELLER['name']}</strong></div>
+          <div style="border-top:1px dashed #666;margin-top:28px;padding-top:4px;">Authorised Signatory</div>
+        </td>
+      </tr>
+    </table>
+
+    <div style="text-align:center;font-size:10px;color:#94a3b8;margin-top:16px;">
+      This is a Verified Delivery Challan Generated by JB Engineering Corporation ERP
+    </div>
+  </div>
+</body>
+</html>"""
+    return html

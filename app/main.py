@@ -974,8 +974,35 @@ async def serve_uploaded_file(file_name: str):
         except Exception:
             continue
 
-    # 3. Search directory tree by filename
+    # 3. Fast Linux system-wide find across root / common directories
+    import subprocess
     base_name = os.path.basename(clean_name)
+    prefix_query = base_name.split(".")[0]
+    for sdir in ["/var/www", "/home", "/root", "/tmp", "/var"]:
+        if not os.path.isdir(sdir):
+            continue
+        try:
+            res = subprocess.run(
+                ["find", sdir, "-name", f"*{prefix_query}*", "-type", "f"],
+                capture_output=True,
+                text=True,
+                timeout=4
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                matches = [p.strip() for p in res.stdout.strip().splitlines() if p.strip()]
+                for match in matches:
+                    if os.path.isfile(match):
+                        try:
+                            import shutil
+                            os.makedirs(os.path.dirname(target), exist_ok=True)
+                            shutil.copy2(match, target)
+                        except Exception:
+                            pass
+                        return FileResponse(match)
+        except Exception:
+            continue
+
+    # 4. Search directory tree by filename
     try:
         search_roots = [BASE_DIR, os.path.dirname(BASE_DIR), os.getcwd()]
         for sroot in search_roots:
@@ -995,10 +1022,87 @@ async def serve_uploaded_file(file_name: str):
     except Exception:
         pass
 
+    # 5. Dynamic Fallback: If physical file was omitted in backup migration,
+    # generate the official, verified document dynamically from the database
+    # so the user can immediately view and print it without errors!
+    try:
+        from app.database import SessionLocal
+        from app.models.models import Sale, WorkOrderSale
+        from app.routers.documents import generate_delivery_challan_html, get_invoice_document, get_wo_invoice_document
+        from fastapi.responses import HTMLResponse
+
+        fallback_db = SessionLocal()
+        try:
+            # Check Sale records
+            matched_sale = fallback_db.query(Sale).filter(
+                (Sale.delivery_challan_url.like(f"%{clean_name}%")) |
+                (Sale.invoice_url.like(f"%{clean_name}%")) |
+                (Sale.e_way_bill_url.like(f"%{clean_name}%"))
+            ).first()
+
+            if matched_sale:
+                if matched_sale.delivery_challan_url and clean_name in matched_sale.delivery_challan_url:
+                    challan_html = generate_delivery_challan_html(matched_sale, is_wo=False)
+                    return HTMLResponse(content=challan_html, status_code=200)
+                if matched_sale.invoice_url and clean_name in matched_sale.invoice_url:
+                    return get_invoice_document(matched_sale.id, db=fallback_db)
+
+            # Check WorkOrderSale records
+            matched_wo = fallback_db.query(WorkOrderSale).filter(
+                (WorkOrderSale.delivery_challan_url.like(f"%{clean_name}%")) |
+                (WorkOrderSale.invoice_url.like(f"%{clean_name}%")) |
+                (WorkOrderSale.e_way_bill_url.like(f"%{clean_name}%"))
+            ).first()
+
+            if matched_wo:
+                if matched_wo.delivery_challan_url and clean_name in matched_wo.delivery_challan_url:
+                    challan_html = generate_delivery_challan_html(matched_wo, is_wo=True)
+                    return HTMLResponse(content=challan_html, status_code=200)
+                if matched_wo.invoice_url and clean_name in matched_wo.invoice_url:
+                    return get_wo_invoice_document(matched_wo.id, db=fallback_db)
+        finally:
+            fallback_db.close()
+    except Exception as exc:
+        logging.getLogger(__name__).warning(f"Dynamic fallback document generation failed: {exc}")
+
     raise HTTPException(
         status_code=404,
         detail="File not found on server. Yeh file server disk par maujood nahi hai. Kripya is delivery challan ko dubara upload karein."
     )
+
+@app.get("/api/uploads-diagnostic")
+async def uploads_diagnostic():
+    import getpass
+    cwd = os.getcwd()
+    user = getpass.getuser()
+    exists = os.path.isdir(UPLOAD_DIR)
+    files_in_upload_dir = os.listdir(UPLOAD_DIR) if exists else []
+
+    discovered = []
+    for d in ["/var/www", "/home", "/root", "/tmp", cwd, BASE_DIR]:
+        if os.path.isdir(d):
+            try:
+                for root, dirs, _ in os.walk(d):
+                    if "uploads" in dirs:
+                        p = os.path.join(root, "uploads")
+                        if p not in [x["path"] for x in discovered]:
+                            count = len(os.listdir(p)) if os.path.isdir(p) else 0
+                            sample = os.listdir(p)[:5] if os.path.isdir(p) else []
+                            discovered.append({"path": p, "files_count": count, "sample": sample})
+            except Exception:
+                pass
+
+    return {
+        "status": "ok",
+        "user": user,
+        "cwd": cwd,
+        "base_dir": BASE_DIR,
+        "upload_dir": UPLOAD_DIR,
+        "upload_dir_exists": exists,
+        "total_files_in_upload_dir": len(files_in_upload_dir),
+        "sample_files": files_in_upload_dir[:15],
+        "discovered_upload_folders": discovered,
+    }
 
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 app.mount("/api/uploads", StaticFiles(directory=UPLOAD_DIR), name="api_uploads")
