@@ -44,6 +44,8 @@ def list_credit_notes(
         q = q.filter(CreditNote.sale_type == sale_type.upper())
     if sale_id:
         q = q.filter(CreditNote.sale_id == sale_id)
+    if wo_sale_id:
+        q = q.filter(CreditNote.wo_sale_id == wo_sale_id)
     records = q.all()
     import re
     def natural_sort_key(cn):

@@ -931,12 +931,14 @@ async def enforce_marketing_application_access(request, call_next):
         db.close()
     return await call_next(request)
 
-# Ensure uploads directory exists
-UPLOAD_DIR = "uploads"
+# Ensure uploads directory exists (use absolute path to be independent of CWD)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 if not os.path.exists(UPLOAD_DIR):
-    os.makedirs(UPLOAD_DIR)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+app.mount("/api/uploads", StaticFiles(directory=UPLOAD_DIR), name="api_uploads")
 
 app.include_router(constants.router)
 app.include_router(dashboard.router)

@@ -7,7 +7,8 @@ from io import BytesIO
 from typing import Any, Dict, List
 from fastapi import UploadFile, HTTPException
 
-UPLOAD_DIR = "uploads"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 MAX_UPLOAD_SIZE = 1 * 1024 * 1024  # 1 MB
 
 

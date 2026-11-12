@@ -48,7 +48,8 @@ def save_upload(file_bytes: bytes, filename: str, content_type: str = "applicati
     if settings.r2_enabled:
         return upload_file(file_bytes, filename, content_type)
 
-    upload_dir = "uploads"
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    upload_dir = os.path.join(base_dir, "uploads")
     os.makedirs(upload_dir, exist_ok=True)
     file_path = os.path.join(upload_dir, filename)
     with open(file_path, "wb") as f:
