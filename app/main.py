@@ -553,12 +553,13 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         pass
 
-            # Soft-delete columns for store_purchase_material_receipts
+            # Soft-delete columns and payment_due_date for store_purchase_material_receipts
             for col, dtype in [
                 ("is_deleted", "BOOLEAN NOT NULL DEFAULT FALSE"),
                 ("deleted_at", "DATETIME NULL"),
                 ("deleted_by", "VARCHAR(100) NULL"),
                 ("permanent_delete_at", "DATETIME NULL"),
+                ("payment_due_date", "DATE NULL"),
             ]:
                 try:
                     conn.execute(text(f"SELECT {col} FROM store_purchase_material_receipts LIMIT 1"))

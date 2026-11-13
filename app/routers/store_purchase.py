@@ -2085,13 +2085,7 @@ class MaterialReceiptPayload(BaseModel):
 
 
     bill_file_url: str | None = None
-
-
-
-
-
-
-
+    payment_due_date: date | None = None
     remarks: str | None = None
 
 
@@ -6992,39 +6986,60 @@ def patch_material_receipt_bill(receipt_id: int, payload: MaterialReceiptBillPat
 
 
 
+def parse_payment_terms_days(terms: str | None) -> int | None:
+    if not terms:
+        return None
+    t = str(terms).strip().lower()
+    if any(k in t for k in ["advance", "dispatch", "immediate"]):
+        return 0
+    day_match = re.search(r"(\d+)\s*(?:to|-)\s*(\d+)\s*day", t)
+    if day_match:
+        return int(day_match.group(2))
+    single_day_match = re.search(r"(\d+)\s*day", t)
+    if single_day_match:
+        return int(single_day_match.group(1))
+    nums = re.findall(r"\d+", t)
+    if nums:
+        return int(nums[-1])
+    return None
+
+
+def calculate_payment_due_date(received_date: date | None, payment_terms: str | None) -> date | None:
+    if not received_date:
+        return None
+    days = parse_payment_terms_days(payment_terms)
+    if days is None:
+        return None
+    return received_date + timedelta(days=days)
+
+
+def compute_payment_status(due_date: date | None, amount_paid: float, invoice_total: float, explicit_status: str | None = None) -> str:
+    amt = round(amount_paid or 0.0, 2)
+    tot = round(invoice_total or 0.0, 2)
+    today = date.today()
+
+    if tot > 0 and amt >= tot:
+        return "Paid"
+    if amt > 0:
+        return "Partially Paid"
+    if due_date:
+        if due_date < today:
+            return "Overdue"
+        elif due_date == today:
+            return "Due Today"
+        else:
+            return "Upcoming"
+    if explicit_status in {"Paid", "Partially Paid", "Overdue", "Due Today", "Upcoming"}:
+        return explicit_status
+    return "Upcoming"
+
+
 class MaterialReceiptPaymentPatch(BaseModel):
-
-
-
-
-
-
-
     payment_status: str
-
-
-
-
-
-
-
     amount_paid: float = Field(default=0, ge=0)
-
-
-
-
-
-
-
     payment_date: date | None = None
-
-
-
-
-
-
-
     payment_reference: str | None = None
+    payment_due_date: date | None = None
 
 
 
@@ -7057,125 +7072,48 @@ class MaterialReceiptPaymentPatch(BaseModel):
 
 
 def patch_material_receipt_payment(receipt_id: int, payload: MaterialReceiptPaymentPatch, user: User = Depends(store_admin), db: Session = Depends(get_db)):
-
-
-
-
-
-
-
     """Update payment status on an existing material receipt."""
-
-
-
-
-
-
-
-    if payload.payment_status not in {"Unpaid", "Partially Paid", "Paid"}:
-
-
-
-
-
-
-
-        raise HTTPException(status_code=422, detail="Payment status must be Unpaid, Partially Paid, or Paid.")
-
-
-
-
-
-
+    allowed_statuses = {"Unpaid", "Upcoming", "Due Today", "Overdue", "Partially Paid", "Paid"}
+    if payload.payment_status not in allowed_statuses:
+        raise HTTPException(status_code=422, detail=f"Payment status must be one of: {', '.join(allowed_statuses)}.")
 
     receipt = db.get(StorePurchaseMaterialReceipt, receipt_id)
-
-
-
-
-
-
-
     if not receipt:
-
-
-
-
-
-
-
         raise HTTPException(status_code=404, detail="Material receipt not found.")
 
+    detail = receipt.order.details if receipt.order else None
+    taxable_amount = round(sum((line.amount or 0) for line in receipt.lines), 2)
+    gst_rate = detail.gst_rate if detail else 0
+    freight_charge = round(receipt.freight_charge or 0, 2)
+    gst_amount = round((taxable_amount + freight_charge) * gst_rate / 100, 2)
+    invoice_total = round(taxable_amount + freight_charge + gst_amount, 2)
 
+    if payload.payment_due_date:
+        receipt.payment_due_date = payload.payment_due_date
+    elif receipt.payment_due_date is None and receipt.invoice_date and detail and detail.payment_terms:
+        receipt.payment_due_date = calculate_payment_due_date(receipt.invoice_date, detail.payment_terms)
 
+    # Determine status
+    if payload.amount_paid >= invoice_total and invoice_total > 0:
+        computed_status = "Paid"
+    elif payload.amount_paid > 0:
+        computed_status = "Partially Paid"
+    elif payload.payment_status in {"Upcoming", "Due Today", "Overdue", "Paid", "Partially Paid"}:
+        computed_status = payload.payment_status
+    else:
+        computed_status = compute_payment_status(receipt.payment_due_date, payload.amount_paid, invoice_total)
 
-
-
-
-    receipt.payment_status = payload.payment_status
-
-
-
-
-
-
-
+    receipt.payment_status = computed_status
     receipt.amount_paid = payload.amount_paid
-
-
-
-
-
-
-
     receipt.payment_date = payload.payment_date
-
-
-
-
-
-
-
     receipt.payment_reference = (payload.payment_reference or "").strip() or None
-
-
-
-
-
-
-
     receipt.updated_by = user.name
-
-
-
-
-
-
-
     receipt.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(receipt)
 
-
-
-
-
-
-
-    db.commit(); db.refresh(receipt)
-
-
-
-
-
-
-
-    log_activity(db, "Payment Status Updated", "StorePurchaseOrder", f"Updated payment status to '{payload.payment_status}' (amount: ₹{payload.amount_paid:,.2f}) for receipt #{receipt.id}.", user.name, entity_id=receipt.id, workspace="Store")
-
-
-
-
-
-
-
+    pending_amt = max(0.0, round(invoice_total - (receipt.amount_paid or 0), 2))
+    log_activity(db, "Payment Status Updated", "StorePurchaseOrder", f"Updated payment status to '{receipt.payment_status}' (amount: ₹{payload.amount_paid:,.2f}, pending: ₹{pending_amt:,.2f}) for receipt #{receipt.id}.", user.name, entity_id=receipt.id, workspace="Store")
     return _material_receipt_response(receipt)
 
 
@@ -7554,44 +7492,17 @@ def create_material_receipt(payload: MaterialReceiptPayload, user: User = Depend
 
     detail = order.details
 
+    due_date = getattr(payload, "payment_due_date", None)
+    if not due_date and payload.invoice_date and detail and detail.payment_terms:
+        due_date = calculate_payment_due_date(payload.invoice_date, detail.payment_terms)
 
-
-
-
-
+    initial_payment_status = compute_payment_status(due_date, 0.0, 0.0)
 
     receipt = StorePurchaseMaterialReceipt(
-
-
-
-
-
-
-
         order_id=order.id, invoice_date=payload.invoice_date, invoice_number=invoice_number,
-
-
-
-
-
-
-
         freight_charge=payload.freight_charge, bill_file_url=payload.bill_file_url, vendor_name=order.supplier, reference=detail.reference if detail else None,
-
-
-
-
-
-
-
         vendor_code=detail.vendor_code if detail else None, remarks=payload.remarks, created_by=user.name,
-
-
-
-
-
-
-
+        payment_status=initial_payment_status, payment_due_date=due_date, amount_paid=0.0,
     )
 
 
@@ -7834,6 +7745,10 @@ def update_material_receipt(receipt_id: int, payload: MaterialReceiptPayload, us
     }
     lines_changed = (existing_lines_map != payload_lines_map or len(receipt.lines) != len(payload.lines))
 
+    old_invoice_date = receipt.invoice_date
+    old_due_date = receipt.payment_due_date
+    invoice_date_changed = (old_invoice_date != payload.invoice_date)
+
     detail = order.details
     receipt.order_id = order.id
     receipt.invoice_date = payload.invoice_date
@@ -7846,6 +7761,22 @@ def update_material_receipt(receipt_id: int, payload: MaterialReceiptPayload, us
     receipt.remarks = payload.remarks
     receipt.updated_by = user.name
     receipt.updated_at = datetime.utcnow()
+
+    if getattr(payload, "payment_due_date", None):
+        receipt.payment_due_date = payload.payment_due_date
+    elif invoice_date_changed or receipt.payment_due_date is None:
+        receipt.payment_due_date = calculate_payment_due_date(payload.invoice_date, detail.payment_terms if detail else None)
+
+    if invoice_date_changed:
+        log_activity(
+            db,
+            "Material Receipt Date Updated",
+            "StorePurchaseOrder",
+            f"Updated Material Receipt #{receipt.id} (Inv: {receipt.invoice_number}) received date from {old_invoice_date} to {payload.invoice_date}. Payment due date recalculated from {old_due_date} to {receipt.payment_due_date}.",
+            user.name,
+            entity_id=receipt.id,
+            workspace="Store"
+        )
 
     if lines_changed:
         receipt_line_ids = [line.id for line in receipt.lines]
@@ -9964,7 +9895,8 @@ def _order_response(order: StorePurchaseOrder, db=None):
 
 
 
-                    "item_name": (_inventory_group_and_item(session, line.item_description)[1] if session and _inventory_group_and_item(session, line.item_description)[1] != "General" else line.item_description),
+                    "item_name": line.item_description,
+                    "stock_item": (_inventory_group_and_item(session, line.item_description)[1] if session and _inventory_group_and_item(session, line.item_description)[1] != "General" else line.item_description),
 
 
 
@@ -10066,110 +9998,41 @@ def _material_receipt_response(receipt: StorePurchaseMaterialReceipt):
 
 
     gst_amount = round((taxable_amount + freight_charge) * gst_rate / 100, 2)
+    invoice_total = round(taxable_amount + freight_charge + gst_amount, 2)
+    amount_paid = round(receipt.amount_paid or 0, 2)
+    pending_amount = max(0.0, round(invoice_total - amount_paid, 2))
 
+    due_date = receipt.payment_due_date
+    if due_date is None and receipt.invoice_date and detail and detail.payment_terms:
+        due_date = calculate_payment_due_date(receipt.invoice_date, detail.payment_terms)
 
-
-
-
-
+    computed_status = compute_payment_status(due_date, amount_paid, invoice_total, receipt.payment_status)
+    today = date.today()
+    is_overdue = bool(due_date and due_date < today and pending_amount > 0)
+    days_overdue = max(0, (today - due_date).days) if is_overdue else 0
+    days_remaining = max(0, (due_date - today).days) if (due_date and due_date >= today and pending_amount > 0) else 0
+    payment_terms_days = parse_payment_terms_days(detail.payment_terms) if detail else None
 
     return {
-
-
-
-
-
-
-
         "id": receipt.id, "order_id": receipt.order_id, "order_number": receipt.order.order_number,
-
-
-
-
-
-
-
         "vendor_name": receipt.vendor_name, "reference": receipt.reference, "vendor_code": receipt.vendor_code,
-
-
-
-
-
-
-
         "invoice_date": receipt.invoice_date, "invoice_number": receipt.invoice_number,
-
-
-
-
-
-
-
         "bill_file_url": receipt.bill_file_url, "remarks": receipt.remarks,
-
-
-
-
-
-
-
         "created_at": receipt.created_at, "created_by": receipt.created_by,
-
-
-
-
-
-
-
         "updated_at": receipt.updated_at, "updated_by": receipt.updated_by,
-
-
-
-
-
-
-
-        "payment_status": receipt.payment_status or "Unpaid",
-
-
-
-
-
-
-
-        "amount_paid": round(receipt.amount_paid or 0, 2),
-
-
-
-
-
-
-
+        "payment_status": computed_status,
+        "amount_paid": amount_paid,
+        "pending_amount": pending_amount,
+        "payment_due_date": due_date,
+        "payment_terms": detail.payment_terms if detail else None,
+        "payment_terms_days": payment_terms_days,
+        "is_overdue": is_overdue,
+        "days_overdue": days_overdue,
+        "days_remaining": days_remaining,
         "payment_date": receipt.payment_date,
-
-
-
-
-
-
-
         "payment_reference": receipt.payment_reference,
-
-
-
-
-
-
-
         "gst_rate": gst_rate, "taxable_amount": taxable_amount, "freight_charge": freight_charge, "gst_amount": gst_amount,
-
-
-
-
-
-
-
-        "invoice_total": round(taxable_amount + freight_charge + gst_amount, 2),
+        "invoice_total": invoice_total,
 
 
 
@@ -11694,6 +11557,7 @@ def delete_vendor(vendor_id: int, db: Session = Depends(get_db), user: User = De
 
 
     return {"message": "Vendor deleted successfully."}
+
 
 
 

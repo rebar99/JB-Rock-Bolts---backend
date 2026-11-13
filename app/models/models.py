@@ -388,6 +388,7 @@ class StorePurchaseMaterialReceipt(Base):
     amount_paid = Column(Float, nullable=True, default=0)
     payment_date = Column(Date, nullable=True)
     payment_reference = Column(String(200), nullable=True)
+    payment_due_date = Column(Date, nullable=True)
 
     # Soft-delete fields
     is_deleted = Column(Boolean, default=False, nullable=False, server_default="0")
