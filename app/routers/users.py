@@ -105,12 +105,14 @@ def approve_user(
     user.is_active = True
 
     # Grant access based on workspace selection
-    workspace = (payload.workspace or "both").strip().lower()
-    grant_marketing = workspace in ("marketing", "both")
-    grant_store = workspace in ("store", "both")
+    ws_raw = (payload.workspace or "all").strip().lower()
+    ws_parts = set(p.strip() for p in ws_raw.replace("+", ",").split(","))
+    grant_marketing = "all" in ws_parts or "both" in ws_parts or "marketing" in ws_parts
+    grant_store = "all" in ws_parts or "both" in ws_parts or "store" in ws_parts
+    grant_accounts = "all" in ws_parts or "accounts" in ws_parts
 
     apps = {app.code: app for app in db.query(Application).all()}
-    for code, should_grant in [("marketing", grant_marketing), ("store_purchase", grant_store)]:
+    for code, should_grant in [("marketing", grant_marketing), ("store_purchase", grant_store), ("accounts", grant_accounts)]:
         if code not in apps:
             continue
         row = db.query(ApplicationAccess).filter_by(user_id=user.id, application_id=apps[code].id).first()
@@ -153,12 +155,14 @@ def update_user_workspace(
     if not user.is_active:
         raise HTTPException(status_code=400, detail="User has not been approved yet.")
 
-    workspace = (payload.workspace or "both").strip().lower()
-    grant_marketing = workspace in ("marketing", "both")
-    grant_store = workspace in ("store", "both")
+    ws_raw = (payload.workspace or "all").strip().lower()
+    ws_parts = set(p.strip() for p in ws_raw.replace("+", ",").split(","))
+    grant_marketing = "all" in ws_parts or "both" in ws_parts or "marketing" in ws_parts
+    grant_store = "all" in ws_parts or "both" in ws_parts or "store" in ws_parts
+    grant_accounts = "all" in ws_parts or "accounts" in ws_parts
 
     apps = {app.code: app for app in db.query(Application).all()}
-    for code, should_grant in [("marketing", grant_marketing), ("store_purchase", grant_store)]:
+    for code, should_grant in [("marketing", grant_marketing), ("store_purchase", grant_store), ("accounts", grant_accounts)]:
         if code not in apps:
             continue
         row = db.query(ApplicationAccess).filter_by(user_id=user.id, application_id=apps[code].id).first()
@@ -294,13 +298,13 @@ async def login(payload: UserLogin, db: Session = Depends(get_db)):
     access = access_map(user)
     has_marketing = access.get("marketing") not in (None, "none")
     has_store = access.get("store_purchase") not in (None, "none")
+    has_accounts = access.get("accounts") not in (None, "none")
 
     ws = payload.workspace
     if not ws:
-        if has_store and not has_marketing:
-            ws = "Store"
-        elif has_marketing and not has_store:
-            ws = "Marketing"
+        single_ws = [name for name, has in [("Store", has_store), ("Marketing", has_marketing), ("Accounts", has_accounts)] if has]
+        if len(single_ws) == 1:
+            ws = single_ws[0]
         else:
             ws = "Software Selection"
     else:
@@ -411,10 +415,10 @@ def logout(
         access = access_map(user)
         has_marketing = access.get("marketing") not in (None, "none")
         has_store = access.get("store_purchase") not in (None, "none")
-        if has_store and not has_marketing:
-            ws = "Store"
-        elif has_marketing and not has_store:
-            ws = "Marketing"
+        has_accounts = access.get("accounts") not in (None, "none")
+        single_ws = [name for name, has in [("Store", has_store), ("Marketing", has_marketing), ("Accounts", has_accounts)] if has]
+        if len(single_ws) == 1:
+            ws = single_ws[0]
         else:
             ws = "Software Selection"
     ws = notifications._normalize_workspace(ws or "Marketing")
@@ -464,10 +468,10 @@ async def force_logout_user(
         access = access_map(user)
         has_marketing = access.get("marketing") not in (None, "none")
         has_store = access.get("store_purchase") not in (None, "none")
-        if has_store and not has_marketing:
-            ws = "Store"
-        elif has_marketing and not has_store:
-            ws = "Marketing"
+        has_accounts = access.get("accounts") not in (None, "none")
+        single_ws = [name for name, has in [("Store", has_store), ("Marketing", has_marketing), ("Accounts", has_accounts)] if has]
+        if len(single_ws) == 1:
+            ws = single_ws[0]
         else:
             ws = "Software Selection"
     ws = notifications._normalize_workspace(ws or "Marketing")
@@ -599,6 +603,7 @@ def recent_logins(
         acc = access_map(u)
         has_marketing = bool(u.is_super_admin or acc.get("marketing") not in (None, "none"))
         has_store = bool(u.is_super_admin or acc.get("store_purchase") not in (None, "none"))
+        has_accounts = bool(u.is_super_admin or acc.get("accounts") not in (None, "none"))
 
         # Filter by requested workspace:
         # Users with both access appear in BOTH tabs.
@@ -609,6 +614,11 @@ def recent_logins(
         elif filter_ws == "Marketing":
             if not has_marketing:
                 continue
+        elif filter_ws == "Accounts":
+            if not has_accounts:
+                continue
+        elif filter_ws:
+            continue
 
         seen_users.add(s.user_id)
 

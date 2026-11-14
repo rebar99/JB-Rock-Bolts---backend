@@ -12,15 +12,16 @@ VALID_ROLES = {"user", "admin"}
 class AccessUpdate(BaseModel):
     marketing: str
     store_purchase: str
+    accounts: str = "none"
     is_super_admin: bool = False
 
 def access_map(user: User) -> Dict[str, str]:
     # Super Admin always has admin access to all applications
     if user.is_super_admin or (user.email and user.email.lower() == "deepikar412003@gmail.com"):
-        return {"marketing": "admin", "store_purchase": "admin"}
+        return {"marketing": "admin", "store_purchase": "admin", "accounts": "admin"}
     # Default to "none" — access is only granted when an explicit row exists.
     # Workspace restriction works because deleting/setting role="none" removes access.
-    result = {"marketing": "none", "store_purchase": "none"}
+    result = {"marketing": "none", "store_purchase": "none", "accounts": "none"}
     for item in user.application_access:
         result[item.application.code] = item.role
     return result
@@ -59,6 +60,7 @@ def users(current_user: User = Depends(get_current_user), db: Session = Depends(
 def update_access(user_id: int, payload: AccessUpdate, actor: User = Depends(require_super_admin), db: Session = Depends(get_db)):
     if payload.marketing not in VALID_ROLES or payload.store_purchase not in VALID_ROLES:
         raise HTTPException(status_code=422, detail="Role must be user or admin.")
+    accounts_role = payload.accounts if payload.accounts in VALID_ROLES else None
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
@@ -72,6 +74,17 @@ def update_access(user_id: int, payload: AccessUpdate, actor: User = Depends(req
             db.add(row)
         else:
             row.role = role
+    # Handle accounts access (optional — only if accounts Application exists)
+    if accounts_role and "accounts" in apps:
+        acc_row = db.query(ApplicationAccess).filter_by(user_id=user.id, application_id=apps["accounts"].id).first()
+        if not acc_row:
+            acc_row = ApplicationAccess(user_id=user.id, application_id=apps["accounts"].id, role=accounts_role)
+            db.add(acc_row)
+        else:
+            acc_row.role = accounts_role
+    elif not accounts_role and "accounts" in apps:
+        # Remove accounts access if set to "none"
+        db.query(ApplicationAccess).filter_by(user_id=user.id, application_id=apps["accounts"].id).delete()
     user.is_super_admin = payload.is_super_admin
     db.commit(); db.refresh(user)
     return serialize_user(user)

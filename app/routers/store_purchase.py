@@ -8522,11 +8522,23 @@ def delete_order(order_id: int, user: User = Depends(store_user), db: Session = 
 
     if not order or order.is_deleted: raise HTTPException(status_code=404, detail="Purchase Order not found.")
 
-
-
-
-
-
+    # Block delete if active material receipts exist for this PO
+    active_receipts = db.query(StorePurchaseMaterialReceipt).filter(
+        StorePurchaseMaterialReceipt.order_id == order.id,
+        StorePurchaseMaterialReceipt.is_deleted == False
+    ).all()
+    if active_receipts:
+        receipt_labels = ", ".join(
+            f"Invoice #{r.invoice_number}" if r.invoice_number else f"Receipt #{r.id}"
+            for r in active_receipts
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot delete PO: {len(active_receipts)} material receipt(s) are linked "
+                f"({receipt_labels}). Please delete all Materials Received entries first."
+            )
+        )
 
     is_creator = is_order_prepared_by(order, user, db)
 

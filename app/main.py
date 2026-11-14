@@ -35,6 +35,7 @@ from app.routers import recently_deleted
 from app.routers import credit_notes
 from app.routers import application_access
 from app.routers import store_purchase
+from app.routers import accounts
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -675,7 +676,7 @@ async def lifespan(app: FastAPI):
     try:
         from app.models.models import Application, ApplicationAccess, User
         from app.config import settings
-        for name, code in [("Marketing", "marketing"), ("Store Purchase", "store_purchase")]:
+        for name, code in [("Marketing", "marketing"), ("Store Purchase", "store_purchase"), ("Accounts", "accounts")]:
             if not db.query(Application).filter_by(code=code).first():
                 db.add(Application(name=name, code=code))
         db.commit()
@@ -883,6 +884,7 @@ async def enforce_marketing_application_access(request, call_next):
     query_string = request.url.query.lower()
     is_store_request = (
         path.startswith("/api/store-purchase")
+        or path.startswith("/api/accounts")
         or (path.startswith("/api/uom") and "type=store" in query_string)
         or (path.startswith("/api/item-master") and "type=store" in query_string)
     )
@@ -1131,6 +1133,7 @@ app.include_router(recently_deleted.router)
 app.include_router(credit_notes.router)
 app.include_router(application_access.router)
 app.include_router(store_purchase.router)
+app.include_router(accounts.router)
 
 
 @app.get("/", tags=["Health"])
