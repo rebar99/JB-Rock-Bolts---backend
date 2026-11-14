@@ -704,6 +704,48 @@ async def lifespan(app: FastAPI):
             logger.info('[Startup] Recalculated all PO and WO delivered quantities.')
         except Exception as _recalc_err:
             logger.warning(f'[Startup] Error recalculating quantities: {_recalc_err}')
+
+        # ── Auto-heal swapped store_purchase_items (item in name, General in stock_item) ──
+        try:
+            from app.models.models import StorePurchaseItem, StorePOItemMasterItem, StorePOItemMasterSize, StorePurchaseStockTransaction
+            sizes = db.query(StorePOItemMasterSize).join(StorePOItemMasterItem).all()
+            size_map = {}
+            for s in sizes:
+                if s.size and s.item:
+                    norm = " ".join(s.size.strip().lower().split())
+                    size_map[norm] = (s.item.name.strip(), s.size.strip())
+
+            inv_items = db.query(StorePurchaseItem).filter(
+                func.lower(func.coalesce(StorePurchaseItem.stock_item, "general")).in_(["general", "", "legacy"])
+            ).all()
+
+            healed_count = 0
+            for item in inv_items:
+                name_norm = " ".join((item.name or "").strip().lower().split())
+                if name_norm in size_map:
+                    real_group, real_item = size_map[name_norm]
+                    existing = db.query(StorePurchaseItem).filter(
+                        StorePurchaseItem.id != item.id,
+                        func.lower(StorePurchaseItem.name) == real_group.lower(),
+                        func.lower(func.coalesce(StorePurchaseItem.stock_item, "general")) == real_item.lower(),
+                    ).first()
+                    if existing:
+                        existing.previous_quantity = float(existing.previous_quantity or 0) + float(item.previous_quantity or 0)
+                        existing.current_month_quantity = float(existing.current_month_quantity or 0) + float(item.current_month_quantity or 0)
+                        existing.total_received_quantity = float(existing.total_received_quantity or 0) + float(item.total_received_quantity or 0)
+                        existing.quantity = float(existing.quantity or 0) + float(item.quantity or 0)
+                        existing.issued_quantity = float(existing.issued_quantity or 0) + float(item.issued_quantity or 0)
+                        db.query(StorePurchaseStockTransaction).filter(StorePurchaseStockTransaction.item_id == item.id).update({"item_id": existing.id})
+                        db.delete(item)
+                    else:
+                        item.name = real_group
+                        item.stock_item = real_item
+                    healed_count += 1
+            if healed_count > 0:
+                db.commit()
+                logger.info(f"[Startup] Auto-healed {healed_count} swapped store_purchase_items.")
+        except Exception as _heal_err:
+            logger.warning(f"[Startup] Auto-heal inventory error: {_heal_err}")
         # On every server start, mark all previously "active" sessions as logged out.
         # This prevents stale "Online" entries in History when the server was restarted
         # and users didn't explicitly logout (SSE connection was cut by the restart).

@@ -66,7 +66,7 @@ from app.database import get_db
 
 
 
-from app.models.models import StoreVendor, StorePurchaseItem, StorePurchaseStockItem, StorePurchaseOrder, StorePurchaseOrderActivity, StorePurchaseOrderDetail, StorePurchaseOrderLine, StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine, StorePurchaseStockTransaction, StorePurchaseStockTransfer, StorePOItemMasterItem, User, POApprovalLevel, POApprovalLevelApprover, StorePurchaseOrderApproval, POPreparedByConfig, POPreparedBySignature, StorePONotification
+from app.models.models import StoreVendor, StorePurchaseItem, StorePurchaseStockItem, StorePurchaseOrder, StorePurchaseOrderActivity, StorePurchaseOrderDetail, StorePurchaseOrderLine, StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine, StorePurchaseStockTransaction, StorePurchaseStockTransfer, StorePOItemMasterItem, StorePOItemMasterSize, User, POApprovalLevel, POApprovalLevelApprover, StorePurchaseOrderApproval, POPreparedByConfig, POPreparedBySignature, StorePONotification
 
 
 
@@ -643,180 +643,70 @@ def _status(quantity: float, out_of_stock_limit: float | None = 0.0, low_stock_l
 
 
 def _inventory_group_and_item(db: Session, description: str) -> tuple[str, str]:
+    """Resolve a PO's item description or combined item-master value into inventory group + item.
 
-
-
-
-
-
-
-    """Resolve a PO's combined item-master value into inventory group + item.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    The Store PO picker saves values as ``Group Name Item Name``. Inventory
-
-
-
-
-
-
-
-    keeps the group as its master and the trailing value as the item/variant.
-
-
-
-
-
-
-
+    Handles:
+    1. Standalone Item Name (size) from StorePOItemMasterSize (e.g. 'Allen Bolt 10x50 mm ( Full Thread ) (Make TVS)'
+       -> Group: 'General Stores', Item: 'Allen Bolt 10x50 mm ( Full Thread ) (Make TVS)')
+    2. Combined 'Group Name Item Name' format (e.g. 'General Stores Allen Bolt...')
+    3. Standalone Group Name matching StorePOItemMasterItem (e.g. 'General Stores' -> Group: 'General Stores', Item: 'General')
+    4. Size ending with unit regex (e.g. 'Round Black 42mm' -> Group: 'Round Black', Item: '42mm')
+    5. Fallback: (raw, 'General')
     """
-
-
-
-
-
-
+    if not description:
+        return "General Stores", "General"
 
     raw = description.strip()
-
-
-
-
-
-
-
-    candidates = sorted(db.query(StorePOItemMasterItem).all(), key=lambda item: len(item.name), reverse=True)
-
-
-
-
-
-
+    if not raw:
+        return "General Stores", "General"
 
     raw_lower = raw.lower()
+    raw_norm = " ".join(raw_lower.split())
 
+    # 1. Direct check in StorePOItemMasterSize: if description is directly an Item/Size name
+    size_match = (
+        db.query(StorePOItemMasterSize)
+        .join(StorePOItemMasterItem)
+        .filter(func.lower(func.trim(StorePOItemMasterSize.size)) == raw_lower)
+        .first()
+    )
+    if size_match and size_match.item:
+        return size_match.item.name.strip(), size_match.size.strip()
 
+    # 1b. Check StorePOItemMasterSize with normalized whitespace
+    all_sizes = db.query(StorePOItemMasterSize).join(StorePOItemMasterItem).all()
+    for s in all_sizes:
+        if s.size and " ".join(s.size.lower().split()) == raw_norm and s.item:
+            return s.item.name.strip(), s.size.strip()
 
-
-
-
-
+    # 2. Check if description starts with a Group Name prefix (e.g. "General Stores Allen Bolt...")
+    candidates = sorted(db.query(StorePOItemMasterItem).all(), key=lambda item: len(item.name), reverse=True)
     for master in candidates:
-
-
-
-
-
-
-
         group = master.name.strip()
-
-
-
-
-
-
-
         if raw_lower == group.lower():
-
-
-
-
-
-
-
             return group, "General"
-
-
-
-
-
-
-
         prefix = f"{group} ".lower()
-
-
-
-
-
-
-
         if raw_lower.startswith(prefix):
-
-
-
-
-
-
-
             return group, raw[len(group):].strip() or "General"
 
+    # 3. Regular ItemMasterSize (non-store item master) fallback
+    try:
+        from app.models.models import ItemMasterSize, ItemMaster
+        im_match = (
+            db.query(ItemMasterSize)
+            .join(ItemMaster)
+            .filter(func.lower(func.trim(ItemMasterSize.size)) == raw_lower)
+            .first()
+        )
+        if im_match and im_match.item:
+            return im_match.item.name.strip(), im_match.size.strip()
+    except Exception:
+        pass
 
-
-
-
-
-
-    # When no Store item-master mapping exists, PO descriptions commonly end
-
-
-
-
-
-
-
-    # with a size (for example ``Round Black 42mm``). Keep that size as the
-
-
-
-
-
-
-
-    # inventory Item Name and everything before it as the Group Name.
-
-
-
-
-
-
-
-    size_match = re.match(r"^(.*?)(\d+(?:\.\d+)?\s*(?:mm|cm|m|inch|in|kg|g|mt|nos))$", raw, re.IGNORECASE)
-
-
-
-
-
-
-
-    if size_match:
-
-
-
-
-
-
-
-        return size_match.group(1).strip(" ,-"), size_match.group(2).strip()
-
-
-
-
-
-
+    # 4. Trailing unit size match (e.g. "Round Black 42mm")
+    size_match_re = re.match(r"^(.*?)(\d+(?:\.\d+)?\s*(?:mm|cm|m|inch|in|kg|g|mt|nos))$", raw, re.IGNORECASE)
+    if size_match_re:
+        return size_match_re.group(1).strip(" ,-"), size_match_re.group(2).strip()
 
     return raw, "General"
 
