@@ -705,7 +705,7 @@ async def lifespan(app: FastAPI):
         except Exception as _recalc_err:
             logger.warning(f'[Startup] Error recalculating quantities: {_recalc_err}')
 
-        # ── Auto-heal swapped store_purchase_items (item in name, General in stock_item) ──
+        # ── Auto-heal swapped store_purchase_items (non-official group names or swapped items) ──
         try:
             import re
             from sqlalchemy import func
@@ -713,6 +713,8 @@ async def lifespan(app: FastAPI):
 
             def _clean(val) -> str:
                 return re.sub(r'[^a-zA-Z0-9]', '', str(val or '')).lower()
+
+            official_groups = {_clean(g.name): g.name.strip() for g in db.query(StorePOItemMasterItem).all() if g.name}
 
             sizes = db.query(StorePOItemMasterSize).join(StorePOItemMasterItem).all()
             size_map = {}
@@ -726,33 +728,44 @@ async def lifespan(app: FastAPI):
 
             healed_count = 0
             for item in inv_items:
+                name_clean = _clean(item.name)
+                stock_clean = _clean(item.stock_item)
                 stock_val = (item.stock_item or "").strip().lower()
-                if stock_val in ("general", "", "legacy") or item.stock_item is None:
-                    name_clean = _clean(item.name)
-                    if name_clean in size_map:
-                        real_group, real_item = size_map[name_clean]
-                        if item.name == real_group and item.stock_item == real_item:
-                            continue
-                        existing = db.query(StorePurchaseItem).filter(
-                            StorePurchaseItem.id != item.id,
-                            func.lower(StorePurchaseItem.name) == real_group.lower(),
-                            func.lower(func.coalesce(StorePurchaseItem.stock_item, "general")) == real_item.lower(),
-                        ).first()
-                        if existing:
-                            existing.previous_quantity = float(existing.previous_quantity or 0) + float(item.previous_quantity or 0)
-                            existing.current_month_quantity = float(existing.current_month_quantity or 0) + float(item.current_month_quantity or 0)
-                            existing.total_received_quantity = float(existing.total_received_quantity or 0) + float(item.total_received_quantity or 0)
-                            existing.quantity = float(existing.quantity or 0) + float(item.quantity or 0)
-                            existing.issued_quantity = float(existing.issued_quantity or 0) + float(item.issued_quantity or 0)
-                            db.query(StorePurchaseStockTransaction).filter(StorePurchaseStockTransaction.item_id == item.id).update({"item_id": existing.id})
-                            db.delete(item)
-                        else:
-                            item.name = real_group
-                            item.stock_item = real_item
-                        healed_count += 1
+
+                # If item.name is NOT one of our 17 official groups, OR if stock_item is General and name is in size_map
+                matched = None
+                if name_clean not in official_groups:
+                    combined_clean = _clean(f"{item.name} {item.stock_item}")
+                    matched = size_map.get(combined_clean) or size_map.get(name_clean)
+                elif stock_val in ("general", "", "legacy") and name_clean in size_map:
+                    matched = size_map.get(name_clean)
+
+                if matched:
+                    real_group, real_item = matched
+                    if item.name == real_group and item.stock_item == real_item:
+                        continue
+
+                    existing = db.query(StorePurchaseItem).filter(
+                        StorePurchaseItem.id != item.id,
+                        func.lower(StorePurchaseItem.name) == real_group.lower(),
+                        func.lower(func.coalesce(StorePurchaseItem.stock_item, "general")) == real_item.lower(),
+                    ).first()
+                    if existing:
+                        existing.previous_quantity = float(existing.previous_quantity or 0) + float(item.previous_quantity or 0)
+                        existing.current_month_quantity = float(existing.current_month_quantity or 0) + float(item.current_month_quantity or 0)
+                        existing.total_received_quantity = float(existing.total_received_quantity or 0) + float(item.total_received_quantity or 0)
+                        existing.quantity = float(existing.quantity or 0) + float(item.quantity or 0)
+                        existing.issued_quantity = float(existing.issued_quantity or 0) + float(item.issued_quantity or 0)
+                        db.query(StorePurchaseStockTransaction).filter(StorePurchaseStockTransaction.item_id == item.id).update({"item_id": existing.id})
+                        db.delete(item)
+                    else:
+                        item.name = real_group
+                        item.stock_item = real_item
+                    healed_count += 1
+
             if healed_count > 0:
                 db.commit()
-                logger.info(f"[Startup] Auto-healed {healed_count} swapped store_purchase_items.")
+                logger.info(f"[Startup] Auto-healed {healed_count} non-official / swapped store_purchase_items.")
         except Exception as _heal_err:
             logger.warning(f"[Startup] Auto-heal inventory error: {_heal_err}")
         # On every server start, mark all previously "active" sessions as logged out.
