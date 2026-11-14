@@ -4465,6 +4465,60 @@ def create_item(payload: ItemPayload, _: User = Depends(store_admin), db: Sessio
 
 
 
+@router.get("/inventory/fix-swapped-groups")
+@router.post("/inventory/fix-swapped-groups")
+def fix_swapped_inventory_groups(db: Session = Depends(get_db)):
+    """Heal store_purchase_items records where an item name was stored in name and stock_item was General."""
+    import re
+    from sqlalchemy import func
+    from app.models.models import StorePurchaseItem, StorePOItemMasterItem, StorePOItemMasterSize, StorePurchaseStockTransaction
+
+    def _clean(val) -> str:
+        return re.sub(r'[^a-zA-Z0-9]', '', str(val or '')).lower()
+
+    sizes = db.query(StorePOItemMasterSize).join(StorePOItemMasterItem).all()
+    size_map = {}
+    for s in sizes:
+        if s.size and s.item:
+            c = _clean(s.size)
+            if c:
+                size_map[c] = (s.item.name.strip(), s.size.strip())
+
+    inv_items = db.query(StorePurchaseItem).all()
+    healed = []
+    for item in inv_items:
+        stock_val = (item.stock_item or "").strip().lower()
+        if stock_val in ("general", "", "legacy") or item.stock_item is None:
+            name_clean = _clean(item.name)
+            if name_clean in size_map:
+                real_group, real_item = size_map[name_clean]
+                if item.name == real_group and item.stock_item == real_item:
+                    continue
+                old_name = item.name
+                existing = db.query(StorePurchaseItem).filter(
+                    StorePurchaseItem.id != item.id,
+                    func.lower(StorePurchaseItem.name) == real_group.lower(),
+                    func.lower(func.coalesce(StorePurchaseItem.stock_item, "general")) == real_item.lower(),
+                ).first()
+                if existing:
+                    existing.previous_quantity = float(existing.previous_quantity or 0) + float(item.previous_quantity or 0)
+                    existing.current_month_quantity = float(existing.current_month_quantity or 0) + float(item.current_month_quantity or 0)
+                    existing.total_received_quantity = float(existing.total_received_quantity or 0) + float(item.total_received_quantity or 0)
+                    existing.quantity = float(existing.quantity or 0) + float(item.quantity or 0)
+                    existing.issued_quantity = float(existing.issued_quantity or 0) + float(item.issued_quantity or 0)
+                    db.query(StorePurchaseStockTransaction).filter(StorePurchaseStockTransaction.item_id == item.id).update({"item_id": existing.id})
+                    db.delete(item)
+                    action = "merged"
+                else:
+                    item.name = real_group
+                    item.stock_item = real_item
+                    action = "updated"
+                healed.append({"id": item.id, "action": action, "old_name": old_name, "new_group": real_group, "new_item": real_item})
+    if healed:
+        db.commit()
+    return {"status": "ok", "healed_count": len(healed), "items": healed}
+
+
 @router.put("/inventory/{item_id}")
 
 
