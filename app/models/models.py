@@ -178,6 +178,7 @@ class StorePurchaseOrder(Base):
     created_by = Column(String(100), nullable=True)
     created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     approval_cycle = Column(Integer, nullable=False, default=1, server_default="1")
+    company = Column(String(100), nullable=False, default="RE-Bar Couplers India Private Limited", server_default="RE-Bar Couplers India Private Limited")
 
     # Soft-delete fields
     is_deleted = Column(Boolean, default=False, nullable=False, server_default="0")

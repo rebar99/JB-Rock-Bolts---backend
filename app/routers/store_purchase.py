@@ -1661,6 +1661,7 @@ class OrderPayload(BaseModel):
 
 
     po_type: str = "Regular Vendor PO"
+    company: str = "RE-Bar Couplers India Private Limited"
 
 
 
@@ -8170,7 +8171,7 @@ def create_order(payload: OrderPayload, user: User = Depends(store_admin), db: S
 
 
 
-        unit_price=first_line.unit_rate, status="Pending Approval" if applicable_levels else "Finally Approved", po_type=payload.po_type, created_by=user.name,
+        unit_price=first_line.unit_rate, status="Pending Approval" if applicable_levels else "Finally Approved", po_type=payload.po_type, company=payload.company, created_by=user.name,
 
 
 
@@ -8198,7 +8199,7 @@ def create_order(payload: OrderPayload, user: User = Depends(store_admin), db: S
 
 
 
-    detail_data = payload.model_dump(exclude={"order_number", "supplier", "po_type", "items", "status"})
+    detail_data = payload.model_dump(exclude={"order_number", "supplier", "po_type", "company", "items", "status"})
 
 
 
@@ -8723,7 +8724,7 @@ def update_order(order_id: int, payload: OrderPayload, user: User = Depends(stor
 
 
 
-    order.order_number = payload.order_number.strip(); order.supplier = payload.supplier.strip(); order.po_type = payload.po_type
+    order.order_number = payload.order_number.strip(); order.supplier = payload.supplier.strip(); order.po_type = payload.po_type; order.company = payload.company
 
 
 
@@ -8739,7 +8740,7 @@ def update_order(order_id: int, payload: OrderPayload, user: User = Depends(stor
 
 
 
-    for key, value in payload.model_dump(exclude={"order_number", "supplier", "po_type", "items", "status"}).items(): setattr(detail, key, value)
+    for key, value in payload.model_dump(exclude={"order_number", "supplier", "po_type", "company", "items", "status"}).items(): setattr(detail, key, value)
 
 
 
@@ -9560,7 +9561,7 @@ def _order_response(order: StorePurchaseOrder, db=None):
 
 
 
-        "status": order.status, "po_type": order.po_type, "created_at": order.created_at, "created_by": order.created_by,
+        "status": order.status, "po_type": order.po_type, "company": getattr(order, "company", "RE-Bar Couplers India Private Limited") or "RE-Bar Couplers India Private Limited", "created_at": order.created_at, "created_by": order.created_by,
 
 
 
