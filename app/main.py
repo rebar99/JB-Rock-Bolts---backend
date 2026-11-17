@@ -595,6 +595,15 @@ async def lifespan(app: FastAPI):
                         conn.execute(text(f"ALTER TABLE store_purchase_orders ADD COLUMN {col} {dtype}"))
                     except Exception as _e:
                         logger.warning(f"[Migration] store_purchase_orders.{col}: {_e}")
+            # Migrate store_purchase_orders.company
+            try:
+                conn.execute(text("SELECT company FROM store_purchase_orders LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("ALTER TABLE store_purchase_orders ADD COLUMN company VARCHAR(200) NOT NULL DEFAULT 'RE-Bar Couplers India Private Limited'"))
+                    logger.info("[Migration] Added store_purchase_orders.company")
+                except Exception as _e:
+                    logger.warning(f"[Migration] store_purchase_orders.company: {_e}")
             for col, dtype in [("approver_name", "VARCHAR(100) NULL"), ("remarks", "TEXT NULL"), ("workflow_role", "VARCHAR(30) NOT NULL DEFAULT 'approver'"), ("signature_url", "VARCHAR(500) NULL"), ("next_approver_id", "INT NULL"), ("next_approver_name", "VARCHAR(100) NULL"), ("next_signature_url", "VARCHAR(500) NULL"), ("approval_cycle", "INT NOT NULL DEFAULT 1")]:
                 try:
                     conn.execute(text(f"SELECT {col} FROM store_purchase_order_approvals LIMIT 1"))
