@@ -3602,6 +3602,7 @@ class POSequenceUpdatePayload(BaseModel):
 
 
 @router.get("/po-sequence-config")
+@router.get("/po-sequence-config/")
 def get_po_sequence_config(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Fetch PO starting sequence config per company."""
     rows = db.query(StorePOSequenceConfig).all()
@@ -3638,6 +3639,7 @@ def get_po_sequence_config(db: Session = Depends(get_db), user: User = Depends(g
 
 
 @router.post("/po-sequence-config")
+@router.post("/po-sequence-config/")
 def update_po_sequence_config(
     payload: POSequenceUpdatePayload,
     db: Session = Depends(get_db),
