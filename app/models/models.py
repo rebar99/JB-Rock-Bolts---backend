@@ -167,7 +167,7 @@ class StorePurchaseStockTransfer(Base):
 class StorePurchaseOrder(Base):
     __tablename__ = "store_purchase_orders"
     id = Column(Integer, primary_key=True)
-    order_number = Column(String(100), nullable=False, unique=True, index=True)
+    order_number = Column(String(100), nullable=False, index=True)
     supplier = Column(String(200), nullable=False)
     item_name = Column(String(300), nullable=False)
     quantity = Column(Float, nullable=False, default=0)
@@ -258,6 +258,17 @@ class POPreparedBySignature(Base):
     added_by = Column(String(100), nullable=True)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     user = relationship("User")
+
+
+class StorePOSequenceConfig(Base):
+    """Super-admin configured PO starting sequence and prefix per company."""
+    __tablename__ = "store_po_sequence_config"
+    id = Column(Integer, primary_key=True)
+    company = Column(String(150), unique=True, nullable=False, index=True)
+    prefix = Column(String(50), default="STR/0199/")
+    next_number = Column(Integer, nullable=False, default=1)
+    updated_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 class StorePurchaseOrderApproval(Base):
@@ -1420,4 +1431,153 @@ class StoreVendor(Base):
     status = Column(String(50), nullable=False, default="Active")
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HR Department Models
+# ─────────────────────────────────────────────────────────────────────────────
+
+class HREmployee(Base):
+    __tablename__ = "hr_employees"
+    id = Column(Integer, primary_key=True, index=True)
+    employee_code = Column(String(20), unique=True, nullable=False, index=True)
+    name = Column(String(150), nullable=False)
+    designation = Column(String(100))
+    father_name = Column(String(150))
+    date_of_birth = Column(Date)
+    gender = Column(String(20))
+    marital_status = Column(String(30))
+    email = Column(String(150))
+    mobile = Column(String(15))
+    address = Column(Text)
+    date_of_joining = Column(Date)
+    starting_salary = Column(Numeric(12, 2), default=0)
+    present_salary = Column(Numeric(12, 2), default=0)
+    location = Column(String(100))
+    qualification = Column(String(200))
+    qualification_doc_url = Column(String(500))
+    aadhaar_number = Column(String(12))
+    aadhaar_doc_url = Column(String(500))
+    pan_number = Column(String(10))
+    pan_doc_url = Column(String(500))
+    # Bank details
+    bank_account_holder = Column(String(150))
+    bank_name = Column(String(150))
+    bank_account_number = Column(String(30))
+    bank_ifsc = Column(String(11))
+    bank_branch = Column(String(150))
+    bank_doc_url = Column(String(500))
+    profile_image_url = Column(String(500))
+    is_active = Column(Boolean, default=True)
+    inactive_date = Column(Date, nullable=True)
+    created_by = Column(String(100))
+    updated_by = Column(String(100))
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    attendance_records = relationship("HRAttendance", back_populates="employee")
+    salary_records = relationship("HRSalary", back_populates="employee")
+
+
+class HRAttendance(Base):
+    __tablename__ = "hr_attendance"
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(Integer, ForeignKey("hr_employees.id"), nullable=False, index=True)
+    attendance_date = Column(Date, nullable=False)
+    status = Column(String(5), nullable=False, default="P")  # P, A, H, L, WO, HD
+    month = Column(Integer, nullable=False)
+    year = Column(Integer, nullable=False)
+    is_locked = Column(Boolean, default=False)
+    created_by = Column(String(100))
+    updated_by = Column(String(100))
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    __table_args__ = (UniqueConstraint("employee_id", "attendance_date", name="uq_hr_attendance"),)
+
+    employee = relationship("HREmployee", back_populates="attendance_records")
+
+
+class HRAttendanceClose(Base):
+    __tablename__ = "hr_attendance_close"
+    id = Column(Integer, primary_key=True)
+    month = Column(Integer, nullable=False)
+    year = Column(Integer, nullable=False)
+    is_closed = Column(Boolean, default=False)
+    closed_by = Column(String(100))
+    closed_at = Column(DateTime)
+    reopened_by = Column(String(100))
+    reopened_at = Column(DateTime)
+    notes = Column(Text)
+    __table_args__ = (UniqueConstraint("month", "year", name="uq_hr_attendance_close"),)
+
+
+class HRSalaryConfig(Base):
+    __tablename__ = "hr_salary_config"
+    id = Column(Integer, primary_key=True)
+    config_key = Column(String(50), unique=True, nullable=False)
+    config_value = Column(String(200))
+    description = Column(String(300))
+    updated_by = Column(String(100))
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class HRSalary(Base):
+    __tablename__ = "hr_salaries"
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(Integer, ForeignKey("hr_employees.id"), nullable=False, index=True)
+    month = Column(Integer, nullable=False)
+    year = Column(Integer, nullable=False)
+    # Salary basis
+    present_salary = Column(Numeric(12, 2), default=0)
+    total_working_days = Column(Integer, default=26)
+    present_days = Column(Numeric(5, 1), default=0)
+    paid_leave_days = Column(Numeric(5, 1), default=0)
+    unpaid_leave_days = Column(Numeric(5, 1), default=0)
+    absent_days = Column(Numeric(5, 1), default=0)
+    half_days = Column(Numeric(5, 1), default=0)
+    weekly_offs = Column(Numeric(5, 1), default=0)
+    holidays = Column(Numeric(5, 1), default=0)
+    # Earnings
+    basic_salary = Column(Numeric(12, 2), default=0)
+    overtime_amount = Column(Numeric(12, 2), default=0)
+    allowances = Column(Numeric(12, 2), default=0)
+    bonus = Column(Numeric(12, 2), default=0)
+    gross_salary = Column(Numeric(12, 2), default=0)
+    # Deductions
+    salary_deduction = Column(Numeric(12, 2), default=0)
+    advance_deduction = Column(Numeric(12, 2), default=0)
+    pf_deduction = Column(Numeric(12, 2), default=0)
+    other_deductions = Column(Numeric(12, 2), default=0)
+    total_deductions = Column(Numeric(12, 2), default=0)
+    net_salary = Column(Numeric(12, 2), default=0)
+    # Payment
+    payment_status = Column(String(20), default="Pending")  # Pending, Approved, Paid, On Hold
+    payment_date = Column(Date)
+    payment_mode = Column(String(50))
+    transaction_ref = Column(String(200))
+    payment_proof_url = Column(String(500))
+    remarks = Column(Text)
+    generated_by = Column(String(100))
+    approved_by = Column(String(100))
+    paid_by = Column(String(100))
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    __table_args__ = (UniqueConstraint("employee_id", "month", "year", name="uq_hr_salary"),)
+
+    employee = relationship("HREmployee", back_populates="salary_records")
+    audit_logs = relationship("HRSalaryAudit", back_populates="salary")
+
+
+class HRSalaryAudit(Base):
+    __tablename__ = "hr_salary_audit"
+    id = Column(Integer, primary_key=True)
+    salary_id = Column(Integer, ForeignKey("hr_salaries.id"), nullable=False)
+    action = Column(String(50))
+    old_status = Column(String(20))
+    new_status = Column(String(20))
+    changed_by = Column(String(100))
+    changed_at = Column(DateTime, server_default=func.now())
+    notes = Column(Text)
+
+    salary = relationship("HRSalary", back_populates="audit_logs")
 

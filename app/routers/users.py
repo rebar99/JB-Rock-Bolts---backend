@@ -110,9 +110,10 @@ def approve_user(
     grant_marketing = "all" in ws_parts or "both" in ws_parts or "marketing" in ws_parts
     grant_store = "all" in ws_parts or "both" in ws_parts or "store" in ws_parts
     grant_accounts = "all" in ws_parts or "accounts" in ws_parts
+    grant_hr = "all" in ws_parts or "hr" in ws_parts
 
     apps = {app.code: app for app in db.query(Application).all()}
-    for code, should_grant in [("marketing", grant_marketing), ("store_purchase", grant_store), ("accounts", grant_accounts)]:
+    for code, should_grant in [("marketing", grant_marketing), ("store_purchase", grant_store), ("accounts", grant_accounts), ("hr", grant_hr)]:
         if code not in apps:
             continue
         row = db.query(ApplicationAccess).filter_by(user_id=user.id, application_id=apps[code].id).first()
@@ -160,9 +161,10 @@ def update_user_workspace(
     grant_marketing = "all" in ws_parts or "both" in ws_parts or "marketing" in ws_parts
     grant_store = "all" in ws_parts or "both" in ws_parts or "store" in ws_parts
     grant_accounts = "all" in ws_parts or "accounts" in ws_parts
+    grant_hr = "all" in ws_parts or "hr" in ws_parts
 
     apps = {app.code: app for app in db.query(Application).all()}
-    for code, should_grant in [("marketing", grant_marketing), ("store_purchase", grant_store), ("accounts", grant_accounts)]:
+    for code, should_grant in [("marketing", grant_marketing), ("store_purchase", grant_store), ("accounts", grant_accounts), ("hr", grant_hr)]:
         if code not in apps:
             continue
         row = db.query(ApplicationAccess).filter_by(user_id=user.id, application_id=apps[code].id).first()

@@ -66,7 +66,7 @@ from app.database import get_db
 
 
 
-from app.models.models import StoreVendor, StorePurchaseItem, StorePurchaseStockItem, StorePurchaseOrder, StorePurchaseOrderActivity, StorePurchaseOrderDetail, StorePurchaseOrderLine, StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine, StorePurchaseStockTransaction, StorePurchaseStockTransfer, StorePOItemMasterItem, StorePOItemMasterSize, User, POApprovalLevel, POApprovalLevelApprover, StorePurchaseOrderApproval, POPreparedByConfig, POPreparedBySignature, StorePONotification
+from app.models.models import StoreVendor, StorePurchaseItem, StorePurchaseStockItem, StorePurchaseOrder, StorePurchaseOrderActivity, StorePurchaseOrderDetail, StorePurchaseOrderLine, StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine, StorePurchaseStockTransaction, StorePurchaseStockTransfer, StorePOItemMasterItem, StorePOItemMasterSize, User, POApprovalLevel, POApprovalLevelApprover, StorePurchaseOrderApproval, POPreparedByConfig, POPreparedBySignature, StorePONotification, StorePOSequenceConfig
 
 
 
@@ -74,7 +74,7 @@ from app.models.models import StoreVendor, StorePurchaseItem, StorePurchaseStock
 
 
 
-from app.utils.auth import application_role, get_current_user, require_application_access, require_super_admin
+from app.utils.auth import application_role, get_current_user, require_application_access, require_super_admin, is_super_admin_user
 
 
 
@@ -3595,6 +3595,93 @@ def remove_level_approver(level_id: int, user_id: int, _: User = Depends(require
     return {"message": "Approver removed from approval level."}
 
 
+class POSequenceUpdatePayload(BaseModel):
+    company: str
+    prefix: str = "STR/0199/"
+    next_number: int
+
+
+@router.get("/po-sequence-config")
+def get_po_sequence_config(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Fetch PO starting sequence config per company."""
+    rows = db.query(StorePOSequenceConfig).all()
+    configs = {
+        r.company: {
+            "id": r.id,
+            "company": r.company,
+            "prefix": r.prefix or "STR/0199/",
+            "next_number": r.next_number,
+            "updated_by": r.updated_by,
+            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        }
+        for r in rows
+    }
+    # Ensure defaults exist
+    for comp, def_num in [
+        ("RE-Bar Couplers India Private Limited", 33),
+        ("JBEC Construction India Private Limited", 1),
+    ]:
+        if comp not in configs:
+            new_row = StorePOSequenceConfig(company=comp, prefix="STR/0199/", next_number=def_num, updated_by="System")
+            db.add(new_row)
+            db.commit()
+            db.refresh(new_row)
+            configs[comp] = {
+                "id": new_row.id,
+                "company": comp,
+                "prefix": "STR/0199/",
+                "next_number": def_num,
+                "updated_by": "System",
+                "updated_at": None,
+            }
+    return list(configs.values())
+
+
+@router.post("/po-sequence-config")
+def update_po_sequence_config(
+    payload: POSequenceUpdatePayload,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_super_admin),
+):
+    """Super Admin configured starting sequence / next number for POs by company."""
+    comp = payload.company.strip()
+    if not comp:
+        raise HTTPException(status_code=400, detail="Company is required.")
+    if payload.next_number < 1:
+        raise HTTPException(status_code=400, detail="Starting number must be at least 1.")
+
+    row = db.query(StorePOSequenceConfig).filter(StorePOSequenceConfig.company == comp).first()
+    if not row:
+        row = StorePOSequenceConfig(
+            company=comp,
+            prefix=payload.prefix.strip() or "STR/0199/",
+            next_number=payload.next_number,
+            updated_by=user.name,
+        )
+        db.add(row)
+    else:
+        row.prefix = payload.prefix.strip() or "STR/0199/"
+        row.next_number = payload.next_number
+        row.updated_by = user.name
+    db.commit()
+    db.refresh(row)
+    log_activity(
+        db,
+        "PO Sequence Config Updated",
+        "StorePOSequenceConfig",
+        f"Updated starting sequence for '{comp}' to {payload.next_number} (Prefix: {row.prefix}) by {user.name}",
+        user.name,
+    )
+    return {
+        "id": row.id,
+        "company": row.company,
+        "prefix": row.prefix,
+        "next_number": row.next_number,
+        "updated_by": row.updated_by,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
 
 
 
@@ -5786,14 +5873,7 @@ def _stock_status_item_dict(item: StorePurchaseItem):
 
 
         "location": item.location or "",
-
-
-
-
-
-
-
-        "updated_at": item.updated_at,
+        "updated_at": item.updated_at.isoformat() if getattr(item, "updated_at", None) else None,
 
 
 
@@ -7987,6 +8067,7 @@ def create_order(payload: OrderPayload, user: User = Depends(store_admin), db: S
 
     if db.query(StorePurchaseOrder).filter(
             StorePurchaseOrder.order_number == payload.order_number,
+            StorePurchaseOrder.company == (payload.company or "RE-Bar Couplers India Private Limited"),
             StorePurchaseOrder.is_deleted != True
     ).first():
         raise HTTPException(status_code=409, detail="Order number already exists.")
@@ -8419,6 +8500,18 @@ def create_order(payload: OrderPayload, user: User = Depends(store_admin), db: S
 
 
 
+    # Auto-advance the sequence counter for this company if order number matched or exceeded next_number
+    try:
+        seq_row = db.query(StorePOSequenceConfig).filter(StorePOSequenceConfig.company == order.company).first()
+        m = re.search(r'/(\d+)-', order.order_number)
+        if m and seq_row:
+            used_num = int(m.group(1))
+            if used_num >= seq_row.next_number:
+                seq_row.next_number = used_num + 1
+                db.commit()
+    except Exception:
+        pass
+
     log_activity(db, "Store PO Created", "StorePurchaseOrder", f"Created Store PO {order.order_number} for {order.supplier}.", user.name, entity_id=order.id, entity_name=order.order_number, workspace="Store")
 
 
@@ -8681,6 +8774,7 @@ def update_order(order_id: int, payload: OrderPayload, user: User = Depends(stor
 
     if payload.order_number.strip() != order.order_number and db.query(StorePurchaseOrder).filter(
             StorePurchaseOrder.order_number == payload.order_number.strip(),
+            StorePurchaseOrder.company == (payload.company or order.company or "RE-Bar Couplers India Private Limited"),
             StorePurchaseOrder.id != order_id,
             StorePurchaseOrder.is_deleted != True
     ).first():
@@ -9982,6 +10076,7 @@ def _material_receipt_response(receipt: StorePurchaseMaterialReceipt):
 
     return {
         "id": receipt.id, "order_id": receipt.order_id, "order_number": receipt.order.order_number,
+        "company": (receipt.order.company if receipt.order else None) or "RE-Bar Couplers India Private Limited",
         "vendor_name": receipt.vendor_name, "reference": receipt.reference, "vendor_code": receipt.vendor_code,
         "invoice_date": receipt.invoice_date, "invoice_number": receipt.invoice_number,
         "bill_file_url": receipt.bill_file_url, "remarks": receipt.remarks,

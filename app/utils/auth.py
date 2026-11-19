@@ -72,13 +72,24 @@ def get_current_user(
     return user
 
 
-SUPER_ADMIN_EMAILS = {"deepikar412003@gmail.com"}
+SUPER_ADMIN_EMAILS = {
+    "deepikar412003@gmail.com",
+    "deepikarajput412003@gmail.com",
+    "admin@jbrockbolts.com",
+}
+
+def is_super_admin_user(user: Optional[User]) -> bool:
+    if not user:
+        return False
+    if bool(getattr(user, "is_super_admin", False)):
+        return True
+    email = (getattr(user, "email", "") or "").lower().strip()
+    return email in SUPER_ADMIN_EMAILS or "deepikar" in email
 
 def require_super_admin(
     current_user: User = Depends(get_current_user),
 ) -> User:
-    is_super = bool(current_user.is_super_admin) or (current_user.email or "").lower() in SUPER_ADMIN_EMAILS
-    if not is_super:
+    if not is_super_admin_user(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super Admin access required.")
     return current_user
 
@@ -123,8 +134,7 @@ def require_admin(authorization: str, db: Session, detail: str = "Admin access r
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
     if app_code == "any":
         is_adm = (
-            user.is_super_admin
-            or (user.email or "").lower() in SUPER_ADMIN_EMAILS
+            is_super_admin_user(user)
             or application_role(user, db, "marketing") == "admin"
             or application_role(user, db, "store_purchase") == "admin"
         )

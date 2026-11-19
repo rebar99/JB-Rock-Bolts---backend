@@ -36,6 +36,7 @@ from app.routers import credit_notes
 from app.routers import application_access
 from app.routers import store_purchase
 from app.routers import accounts
+from app.routers import hr
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -614,6 +615,24 @@ async def lifespan(app: FastAPI):
                     except Exception as _e:
                         logger.warning(f"[Migration] store_purchase_order_approvals.{col}: {_e}")
 
+            # Safely migrate hr_salaries columns if table exists
+            for col, dtype in [("weekly_offs", "DECIMAL(5,1) DEFAULT 0"), ("holidays", "DECIMAL(5,1) DEFAULT 0")]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM hr_salaries LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE hr_salaries ADD COLUMN {col} {dtype}"))
+                    except Exception:
+                        pass
+
+            # Safely migrate hr_employees columns
+            try:
+                conn.execute(text("SELECT qualification_doc_url FROM hr_employees LIMIT 1"))
+            except Exception:
+                try:
+                    conn.execute(text("ALTER TABLE hr_employees ADD COLUMN qualification_doc_url VARCHAR(500) NULL"))
+                except Exception:
+                    pass
             # ── po_prepared_by_config (legacy singleton) ─────────────────────────
             try:
                 conn.execute(text("SELECT id FROM po_prepared_by_config LIMIT 1"))
@@ -685,7 +704,7 @@ async def lifespan(app: FastAPI):
     try:
         from app.models.models import Application, ApplicationAccess, User
         from app.config import settings
-        for name, code in [("Marketing", "marketing"), ("Store Purchase", "store_purchase"), ("Accounts", "accounts")]:
+        for name, code in [("Marketing", "marketing"), ("Store Purchase", "store_purchase"), ("Accounts", "accounts"), ("HR Department", "hr")]:
             if not db.query(Application).filter_by(code=code).first():
                 db.add(Application(name=name, code=code))
         db.commit()
@@ -1207,6 +1226,7 @@ app.include_router(credit_notes.router)
 app.include_router(application_access.router)
 app.include_router(store_purchase.router)
 app.include_router(accounts.router)
+app.include_router(hr.router)
 
 
 @app.get("/", tags=["Health"])

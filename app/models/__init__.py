@@ -8,3 +8,4 @@ from app.models.models import (  # noqa: F401
     SaleActivity,
     Record,
 )
+# HR models registered separately — imported in main.py via `from app.models import models` (noqa)
