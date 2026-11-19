@@ -60,6 +60,8 @@ def _normalize_workspace(ws: str) -> str:
         return "Marketing"
     if ws.lower().startswith("account"):
         return "Accounts"
+    if ws.lower() == "hr":
+        return "HR"
     return ws  # Other workspaces (e.g. "Software Selection") pass through
 
 

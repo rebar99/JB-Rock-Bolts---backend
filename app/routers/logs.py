@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api/logs", tags=["Logs"])
 
 
 @router.get("", response_model=List[SystemLogOut])
-def list_logs(limit: int = 100, workspace: Optional[str] = None, db: Session = Depends(get_db)):
+def list_logs(limit: int = 100, workspace: Optional[str] = None, user_name: Optional[str] = None, db: Session = Depends(get_db)):
     from app.notifications import _normalize_workspace
     q = db.query(SystemLog)
     try:
@@ -26,6 +26,8 @@ def list_logs(limit: int = 100, workspace: Optional[str] = None, db: Session = D
                 q = q.filter((SystemLog.workspace == ws) | (SystemLog.workspace == None) | (SystemLog.workspace == ""))
             else:
                 q = q.filter(SystemLog.workspace == ws)
+        if user_name:
+            q = q.filter(SystemLog.user == user_name)
         return q.order_by(SystemLog.created_at.desc()).limit(limit).all()
     except Exception as e:
         print(f"Error fetching logs: {e}")

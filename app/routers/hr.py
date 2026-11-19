@@ -21,10 +21,12 @@ from app.models.models import (
     HRSalary,
     HRSalaryAudit,
     HRSalaryConfig,
+    SystemLog,
     User,
 )
 from app.routers.upload_helpers import read_upload_bytes, save_upload_bytes
 from app.utils.auth import get_current_user
+from app import notifications
 
 router = APIRouter(prefix="/api/hr", tags=["HR Department"])
 
@@ -433,6 +435,22 @@ def create_employee(
     db.add(emp)
     db.commit()
     db.refresh(emp)
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        log = SystemLog(
+            action="Employee Added",
+            entity_type="HREmployee",
+            entity_name=emp.name,
+            details=f"New employee {emp.name} ({emp.employee_code}) added.",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
     return _employee_to_dict(emp, detail=True)
 
 
@@ -472,6 +490,22 @@ def update_employee(
     emp.updated_by = current_user.name
     db.commit()
     db.refresh(emp)
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        log = SystemLog(
+            action="Employee Updated",
+            entity_type="HREmployee",
+            entity_name=emp.name,
+            details=f"Employee {emp.name} ({emp.employee_code}) details updated.",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
     return _employee_to_dict(emp, detail=True)
 
 
@@ -493,6 +527,23 @@ def toggle_employee_status(
     emp.updated_by = current_user.name
     db.commit()
     db.refresh(emp)
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        status_label = "Activated" if emp.is_active else "Deactivated"
+        log = SystemLog(
+            action=f"Employee {status_label}",
+            entity_type="HREmployee",
+            entity_name=emp.name,
+            details=f"Employee {emp.name} ({emp.employee_code}) {status_label.lower()} by {current_user.name}.",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
     return _employee_to_dict(emp, detail=True)
 
 
@@ -519,7 +570,22 @@ def delete_employee(
     emp_code = emp.employee_code
     db.delete(emp)
     db.commit()
-
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        log = SystemLog(
+            action="Employee Deleted",
+            entity_type="HREmployee",
+            entity_name=emp_name,
+            details=f"Employee {emp_name} ({emp_code}) deleted by {current_user.name}.",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
     return {"message": f"Employee {emp_name} ({emp_code}) deleted successfully"}
 
 
