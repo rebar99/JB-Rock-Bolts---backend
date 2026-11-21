@@ -1,36 +1,19 @@
 with open('app/routers/store_purchase.py', 'r', encoding='utf-8') as f:
-    lines = f.readlines()
+    content = f.read()
 
-# Find all blocks containing "Deduplication guard"
-guard_positions = []
-for i, line in enumerate(lines):
-    if 'Deduplication guard' in line:
-        guard_positions.append(i)
+marker_start = "\n# ═══════════════════════════════════════════════════════════════════════════\n# TEMPORARY ADMIN ENDPOINT"
+marker_end = "    return {\n        \"status\": \"done\",\n        \"affected_items\": len(affected_item_ids),\n        \"deleted_transactions\": len(deleted_txs),\n        \"details\": deleted_txs,\n        \"qty_corrections\": qty_corrections,\n    }\n"
 
-print(f"Found 'Deduplication guard' at lines: {[p+1 for p in guard_positions]}")
+start_idx = content.find(marker_start)
+end_idx = content.find(marker_end)
 
-# For each block, find its extent
-def find_block_end(lines, start):
-    """Find the end of dedup block starting at 'start'"""
-    for j in range(start+1, min(start+30, len(lines))):
-        if 'db.delete(orphan)' in lines[j]:
-            # End is next two lines (closing comment + blank)
-            return j + 2
-    return start + 25
-
-# Remove blocks at index 1 and 2 (update_item and issue_item), keep index 0
-blocks_to_remove = guard_positions[1:]  # skip first (the correct one)
-print(f"Will remove blocks at lines: {[p+1 for p in blocks_to_remove]}")
-
-# Remove from last to first to preserve line numbers
-for start in reversed(blocks_to_remove):
-    end = find_block_end(lines, start)
-    print(f"Removing lines {start+1} to {end+1}")
-    for j in range(start, min(end+1, len(lines))):
-        print(f"  DELETE: {lines[j][:80]!r}")
-    del lines[start:end+1]
-
-with open('app/routers/store_purchase.py', 'w', encoding='utf-8') as f:
-    f.writelines(lines)
-
-print("Done!")
+if start_idx != -1 and end_idx != -1:
+    end_idx = end_idx + len(marker_end)
+    new_content = content[:start_idx] + "\n"
+    with open('app/routers/store_purchase.py', 'w', encoding='utf-8') as f:
+        f.write(new_content)
+    print(f"Removed temp endpoint (chars {start_idx} to {end_idx})")
+    print(f"File now has {len(new_content)} chars")
+else:
+    print(f"marker_start found: {start_idx != -1}")
+    print(f"marker_end found: {end_idx != -1}")
