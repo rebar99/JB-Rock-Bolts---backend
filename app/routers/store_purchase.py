@@ -4384,6 +4384,14 @@ def _heal_swapped_groups(db: Session) -> list:
                 size_list.append((c, s.item.name.strip(), s.size.strip()))
 
     inv_items = db.query(StorePurchaseItem).all()
+    # Map of all known existing official inventory items: _clean(stock_item) -> (item.name, item.stock_item, item.id)
+    official_inv_map = {}
+    for it in inv_items:
+        if _clean(it.name) in official_groups and it.stock_item:
+            c_st = _clean(it.stock_item)
+            if c_st:
+                official_inv_map[c_st] = (it.name.strip(), it.stock_item.strip(), it.id)
+
     healed = []
     for item in inv_items:
         name_clean = _clean(item.name)
@@ -4393,9 +4401,18 @@ def _heal_swapped_groups(db: Session) -> list:
         if name_clean not in official_groups:
             combined_clean = _clean(f"{item.name} {item.stock_item}")
             matched = size_map.get(combined_clean) or size_map.get(name_clean)
-            if not matched and len(name_clean) >= 6:
+            if not matched:
+                matched_inv = official_inv_map.get(combined_clean) or official_inv_map.get(name_clean)
+                if matched_inv:
+                    matched = (matched_inv[0], matched_inv[1])
+            if not matched and len(combined_clean) >= 6:
                 for c_size, real_g, real_s in size_list:
-                    if c_size.startswith(name_clean) or name_clean.startswith(c_size):
+                    if c_size.startswith(combined_clean) or combined_clean.startswith(c_size):
+                        matched = (real_g, real_s)
+                        break
+            if not matched and len(combined_clean) >= 6:
+                for c_s, (real_g, real_s, _) in official_inv_map.items():
+                    if c_s.startswith(combined_clean) or combined_clean.startswith(c_s):
                         matched = (real_g, real_s)
                         break
         elif stock_val in ("general", "", "legacy") and name_clean in size_map:
