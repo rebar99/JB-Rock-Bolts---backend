@@ -441,7 +441,8 @@ def create_employee(
             action="Employee Added",
             entity_type="HREmployee",
             entity_name=emp.name,
-            details=f"New employee {emp.name} ({emp.employee_code}) added.",
+            details=f"New employee {emp.name} ({emp.employee_code}) added. Designation: {emp.designation or '—'}, Location: {emp.location or '—'}, Salary: ₹{float(emp.present_salary or 0):,.2f}.",
+            changed_fields=f"Code: {emp.employee_code}, Desig: {emp.designation or '—'}, Salary: ₹{float(emp.present_salary or 0):,.2f}",
             user=current_user.name,
             workspace="HR",
         )
@@ -485,18 +486,65 @@ def update_employee(
         if len(mob) != 10:
             raise HTTPException(400, "Mobile number exactly 10 digits hona chahiye.")
         data["mobile"] = mob
+
+    FIELD_LABELS = {
+        "employee_code": "Emp Code",
+        "name": "Name",
+        "father_name": "Father Name",
+        "designation": "Designation",
+        "location": "Location",
+        "mobile": "Mobile",
+        "email": "Email",
+        "date_of_birth": "DOB",
+        "date_of_joining": "Joining Date",
+        "inactive_date": "Inactive Date",
+        "blood_group": "Blood Group",
+        "emergency_contact": "Emergency Contact",
+        "permanent_address": "Permanent Address",
+        "current_address": "Current Address",
+        "aadhar_no": "Aadhar No",
+        "pan_no": "PAN No",
+        "bank_name": "Bank Name",
+        "bank_account_no": "Account No",
+        "ifsc_code": "IFSC Code",
+        "starting_salary": "Starting Salary",
+        "present_salary": "Present Salary",
+        "experience": "Experience",
+        "remarks": "Remarks",
+        "is_active": "Status",
+    }
+    changes = []
     for k, v in data.items():
+        old_val = getattr(emp, k, None)
+        old_str = "" if old_val is None else str(old_val).strip()
+        new_str = "" if v is None else str(v).strip()
+        if old_str != new_str:
+            label = FIELD_LABELS.get(k, k.replace("_", " ").title())
+            if k in ("present_salary", "starting_salary"):
+                try:
+                    old_display = f"₹{float(old_val or 0):,.2f}"
+                    new_display = f"₹{float(v or 0):,.2f}"
+                except Exception:
+                    old_display = old_str or "—"
+                    new_display = new_str or "—"
+                changes.append(f"{label}: {old_display} → {new_display}")
+            else:
+                changes.append(f"{label}: '{old_str or '—'}' → '{new_str or '—'}'")
         setattr(emp, k, v)
+
     emp.updated_by = current_user.name
     db.commit()
     db.refresh(emp)
     # ── Activity log ──────────────────────────────────────────────────────
     try:
+        details_text = f"Employee {emp.name} ({emp.employee_code}) updated: {'; '.join(changes)}" if changes else f"Employee {emp.name} ({emp.employee_code}) details updated."
+        changed_fields_text = ", ".join(changes) if changes else None
         log = SystemLog(
             action="Employee Updated",
             entity_type="HREmployee",
             entity_name=emp.name,
-            details=f"Employee {emp.name} ({emp.employee_code}) details updated.",
+            details=details_text,
+            changed_fields=changed_fields_text,
             user=current_user.name,
             workspace="HR",
         )
@@ -534,7 +582,8 @@ def toggle_employee_status(
             action=f"Employee {status_label}",
             entity_type="HREmployee",
             entity_name=emp.name,
-            details=f"Employee {emp.name} ({emp.employee_code}) {status_label.lower()} by {current_user.name}.",
+            details=f"Employee {emp.name} ({emp.employee_code}) status changed to {status_label} by {current_user.name}." + (f" Inactive Date: {emp.inactive_date}" if not emp.is_active and emp.inactive_date else ""),
+            changed_fields=f"Status: {status_label}",
             user=current_user.name,
             workspace="HR",
         )
@@ -577,12 +626,16 @@ def delete_employee(
             entity_type="HREmployee",
             entity_name=emp_name,
             details=f"Employee {emp_name} ({emp_code}) deleted by {current_user.name}.",
+            changed_fields=f"Deleted: {emp_name} ({emp_code})",
             user=current_user.name,
             workspace="HR",
         )
         db.add(log)
         db.commit()
         db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
         notifications.broadcast(log)
     except Exception:
         pass
@@ -728,6 +781,7 @@ def mark_attendance(
         HRAttendance.employee_id == payload.employee_id,
         HRAttendance.attendance_date == payload.attendance_date,
     ).first()
+    old_status = existing.status if existing else "Unmarked"
     if existing:
         existing.status = payload.status
         existing.updated_by = current_user.name
@@ -741,6 +795,30 @@ def mark_attendance(
             created_by=current_user.name,
         ))
     db.commit()
+
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        status_names = {"P": "Present", "A": "Absent", "H": "Half Day", "PL": "Paid Leave", "L": "Paid Leave", "UL": "Unpaid Leave", "TR": "Travel/Tour", "WO": "Weekly Off", "HD": "Holiday"}
+        new_name = status_names.get(payload.status, payload.status)
+        old_name = status_names.get(old_status, old_status)
+        if old_status != payload.status:
+            dt_str = payload.attendance_date.strftime("%d-%b-%Y")
+            log = SystemLog(
+                action="Attendance Marked",
+                entity_type="HRAttendance",
+                entity_name=emp.name,
+                details=f"Attendance for {emp.name} ({emp.employee_code}) on {dt_str} marked as {new_name} (was {old_name}) by {current_user.name}.",
+                changed_fields=f"{dt_str}: {old_name} → {new_name}",
+                user=current_user.name,
+                workspace="HR",
+            )
+            db.add(log)
+            db.commit()
+            db.refresh(log)
+            notifications.broadcast(log)
+    except Exception:
+        pass
+
     return {"success": True, "employee_id": payload.employee_id,
             "date": payload.attendance_date.isoformat(), "status": payload.status}
 
@@ -780,6 +858,26 @@ def bulk_mark_attendance(
                 created_by=current_user.name,
             ))
     db.commit()
+
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        if valid_records:
+            log = SystemLog(
+                action="Bulk Attendance Marked",
+                entity_type="HRAttendance",
+                entity_name="Multiple Employees",
+                details=f"Bulk attendance marked for {len(valid_records)} record(s) by {current_user.name}.",
+                changed_fields=f"{len(valid_records)} attendance records updated",
+                user=current_user.name,
+                workspace="HR",
+            )
+            db.add(log)
+            db.commit()
+            db.refresh(log)
+            notifications.broadcast(log)
+    except Exception:
+        pass
+
     return {"success": True, "count": len(valid_records)}
 
 
@@ -825,6 +923,27 @@ def close_attendance(
     rec.closed_at = datetime.utcnow()
     rec.notes = payload.notes
     db.commit()
+
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        m_name = MONTH_NAMES[payload.month] if 1 <= payload.month <= 12 else str(payload.month)
+        log = SystemLog(
+            action="Attendance Closed",
+            entity_type="HRAttendanceClose",
+            entity_name=f"{m_name} {payload.year}",
+            details=f"Attendance for {m_name} {payload.year} locked and closed by {current_user.name}." + (f" Notes: {payload.notes}" if payload.notes else ""),
+            changed_fields=f"Status: Closed/Locked ({m_name} {payload.year})",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
+
     return {"success": True, "message": f"Attendance for {payload.month}/{payload.year} closed."}
 
 
@@ -844,6 +963,27 @@ def reopen_attendance(
     rec.reopened_at = datetime.utcnow()
     rec.notes = payload.notes or f"Reopened by {current_user.name}"
     db.commit()
+
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        m_name = MONTH_NAMES[payload.month] if 1 <= payload.month <= 12 else str(payload.month)
+        log = SystemLog(
+            action="Attendance Reopened",
+            entity_type="HRAttendanceClose",
+            entity_name=f"{m_name} {payload.year}",
+            details=f"Attendance for {m_name} {payload.year} reopened by {current_user.name}." + (f" Notes: {payload.notes}" if payload.notes else ""),
+            changed_fields=f"Status: Reopened ({m_name} {payload.year})",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
+
     return {"success": True, "message": f"Attendance for {payload.month}/{payload.year} reopened."}
 
 
@@ -870,6 +1010,26 @@ def update_salary_config(
         else:
             db.add(HRSalaryConfig(config_key=key, config_value=str(value), updated_by=current_user.name))
     db.commit()
+
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        cfg_summary = ", ".join(f"{k}: {v}" for k, v in payload.configs.items())
+        log = SystemLog(
+            action="Salary Config Updated",
+            entity_type="HRSalaryConfig",
+            entity_name="Salary Rules",
+            details=f"Salary configuration updated by {current_user.name}: {cfg_summary}.",
+            changed_fields=cfg_summary,
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
+
     return _get_config(db)
 
 
@@ -1196,6 +1356,27 @@ def generate_salary(
     db.add(sal)
     db.commit()
     db.refresh(sal)
+
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        m_name = MONTH_NAMES[payload.month] if 1 <= payload.month <= 12 else str(payload.month)
+        log = SystemLog(
+            action="Salary Generated",
+            entity_type="HRSalary",
+            entity_name=emp.name,
+            details=f"Salary for {emp.name} ({emp.employee_code}) generated for {m_name} {payload.year} by {current_user.name}. Net Salary: ₹{float(sal.net_salary or 0):,.2f}.",
+            changed_fields=f"Net: ₹{float(sal.net_salary or 0):,.2f}, Basic: ₹{float(sal.basic_salary or 0):,.2f}, Present: {sal.present_days} days",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
+
     return _salary_to_dict(sal)
 
 
@@ -1259,6 +1440,28 @@ def update_salary(
     s.net_salary = round(gross - total_ded, 2)
     db.commit()
     db.refresh(s)
+
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        emp_name = s.employee.name if s.employee else "Employee"
+        MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        m_name = MONTH_NAMES[s.month] if 1 <= s.month <= 12 else str(s.month)
+        log = SystemLog(
+            action="Salary Updated",
+            entity_type="HRSalary",
+            entity_name=emp_name,
+            details=f"Salary for {emp_name} ({m_name} {s.year}) updated by {current_user.name}. Net: ₹{float(s.net_salary or 0):,.2f}, Deductions: ₹{float(s.total_deductions or 0):,.2f}.",
+            changed_fields=f"Net: ₹{float(s.net_salary or 0):,.2f}, Gross: ₹{float(s.gross_salary or 0):,.2f}, Ded: ₹{float(s.total_deductions or 0):,.2f}",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
+
     return _salary_to_dict(s)
 
 
@@ -1272,6 +1475,28 @@ def approve_salary(sal_id: int, db: Session = Depends(get_db), current_user: Use
     s.approved_by = current_user.name
     db.add(HRSalaryAudit(salary_id=s.id, action="approve", old_status=old, new_status="Approved", changed_by=current_user.name))
     db.commit()
+
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        emp_name = s.employee.name if s.employee else "Employee"
+        MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        m_name = MONTH_NAMES[s.month] if 1 <= s.month <= 12 else str(s.month)
+        log = SystemLog(
+            action="Salary Approved",
+            entity_type="HRSalary",
+            entity_name=emp_name,
+            details=f"Salary for {emp_name} ({m_name} {s.year}) approved by {current_user.name}. Amount: ₹{float(s.net_salary or 0):,.2f}.",
+            changed_fields=f"Status: {old} → Approved, Net: ₹{float(s.net_salary or 0):,.2f}",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
+
     return _salary_to_dict(s)
 
 
@@ -1299,6 +1524,28 @@ def mark_salary_paid(
         notes=f"Mode: {payload.payment_mode}, Ref: {payload.transaction_ref}",
     ))
     db.commit()
+
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        emp_name = s.employee.name if s.employee else "Employee"
+        MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        m_name = MONTH_NAMES[s.month] if 1 <= s.month <= 12 else str(s.month)
+        log = SystemLog(
+            action="Salary Paid",
+            entity_type="HRSalary",
+            entity_name=emp_name,
+            details=f"Salary for {emp_name} ({m_name} {s.year}) marked as Paid by {current_user.name}. Amount: ₹{float(s.net_salary or 0):,.2f}. Mode: {payload.payment_mode or '—'}" + (f", Ref: {payload.transaction_ref}" if payload.transaction_ref else ""),
+            changed_fields=f"Status: {old} → Paid, Mode: {payload.payment_mode}, Date: {payload.payment_date}",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
+
     return _salary_to_dict(s)
 
 
@@ -1311,6 +1558,28 @@ def hold_salary(sal_id: int, db: Session = Depends(get_db), current_user: User =
     s.payment_status = "On Hold"
     db.add(HRSalaryAudit(salary_id=s.id, action="hold", old_status=old, new_status="On Hold", changed_by=current_user.name))
     db.commit()
+
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        emp_name = s.employee.name if s.employee else "Employee"
+        MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        m_name = MONTH_NAMES[s.month] if 1 <= s.month <= 12 else str(s.month)
+        log = SystemLog(
+            action="Salary On Hold",
+            entity_type="HRSalary",
+            entity_name=emp_name,
+            details=f"Salary for {emp_name} ({m_name} {s.year}) put On Hold by {current_user.name}.",
+            changed_fields=f"Status: {old} → On Hold",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
+
     return _salary_to_dict(s)
 
 
@@ -1319,9 +1588,34 @@ def delete_salary(sal_id: int, db: Session = Depends(get_db), current_user: User
     s = db.get(HRSalary, sal_id)
     if not s:
         raise HTTPException(404, "Salary record not found")
+    emp_name = s.employee.name if s.employee else "Employee"
+    sal_month = s.month
+    sal_year = s.year
+    net_amt = float(s.net_salary or 0)
     db.query(HRSalaryAudit).filter(HRSalaryAudit.salary_id == sal_id).delete()
     db.delete(s)
     db.commit()
+
+    # ── Activity log ──────────────────────────────────────────────────────
+    try:
+        MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        m_name = MONTH_NAMES[sal_month] if 1 <= sal_month <= 12 else str(sal_month)
+        log = SystemLog(
+            action="Salary Deleted",
+            entity_type="HRSalary",
+            entity_name=emp_name,
+            details=f"Salary record for {emp_name} ({m_name} {sal_year}) deleted by {current_user.name}.",
+            changed_fields=f"Deleted salary {m_name} {sal_year} (₹{net_amt:,.2f})",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
+
     return {"success": True, "message": "Salary record deleted successfully."}
 
 

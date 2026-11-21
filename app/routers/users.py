@@ -301,10 +301,11 @@ async def login(payload: UserLogin, db: Session = Depends(get_db)):
     has_marketing = access.get("marketing") not in (None, "none")
     has_store = access.get("store_purchase") not in (None, "none")
     has_accounts = access.get("accounts") not in (None, "none")
+    has_hr = access.get("hr") not in (None, "none")
 
     ws = payload.workspace
     if not ws:
-        single_ws = [name for name, has in [("Store", has_store), ("Marketing", has_marketing), ("Accounts", has_accounts)] if has]
+        single_ws = [name for name, has in [("Store", has_store), ("Marketing", has_marketing), ("Accounts", has_accounts), ("HR", has_hr)] if has]
         if len(single_ws) == 1:
             ws = single_ws[0]
         else:
@@ -312,13 +313,21 @@ async def login(payload: UserLogin, db: Session = Depends(get_db)):
     else:
         ws = _normalize_workspace(ws)
 
-    log_activity(
-        db, "User Logged In", "User",
-        f"User {user.name} logged in.",
-        user.name, user.id,
-        entity_name=user.name,
-        workspace=ws,
-    )
+    user_workspaces = []
+    if has_marketing or user.is_super_admin: user_workspaces.append("Marketing")
+    if has_store or user.is_super_admin: user_workspaces.append("Store")
+    if has_accounts or user.is_super_admin: user_workspaces.append("Accounts")
+    if has_hr or user.is_super_admin: user_workspaces.append("HR")
+
+    target_workspaces = [ws] if ws in ("Store", "Marketing", "Accounts", "HR") else (user_workspaces or ["Marketing"])
+    for target_ws in target_workspaces:
+        log_activity(
+            db, "User Logged In", "User",
+            f"User {user.name} logged in.",
+            user.name, user.id,
+            entity_name=user.name,
+            workspace=target_ws,
+        )
     return Token(access_token=token, user=serialize_user(user))
 
 from pydantic import BaseModel
@@ -418,7 +427,8 @@ def logout(
         has_marketing = access.get("marketing") not in (None, "none")
         has_store = access.get("store_purchase") not in (None, "none")
         has_accounts = access.get("accounts") not in (None, "none")
-        single_ws = [name for name, has in [("Store", has_store), ("Marketing", has_marketing), ("Accounts", has_accounts)] if has]
+        has_hr = access.get("hr") not in (None, "none")
+        single_ws = [name for name, has in [("Store", has_store), ("Marketing", has_marketing), ("Accounts", has_accounts), ("HR", has_hr)] if has]
         if len(single_ws) == 1:
             ws = single_ws[0]
         else:
@@ -427,13 +437,25 @@ def logout(
 
     notifications.remove_user(user_id)
 
-    log_activity(
-        db, "User Logged Out", "User",
-        f"User {user.name} logged out.",
-        user.name, user.id,
-        entity_name=user.name,
-        workspace=ws,
-    )
+    user_workspaces = []
+    if user.is_super_admin:
+        user_workspaces = ["Marketing", "Store", "Accounts", "HR"]
+    else:
+        access = access_map(user)
+        if access.get("marketing") not in (None, "none"): user_workspaces.append("Marketing")
+        if access.get("store_purchase") not in (None, "none"): user_workspaces.append("Store")
+        if access.get("accounts") not in (None, "none"): user_workspaces.append("Accounts")
+        if access.get("hr") not in (None, "none"): user_workspaces.append("HR")
+
+    target_workspaces = [ws] if ws in ("Store", "Marketing", "Accounts", "HR") else (user_workspaces or ["Marketing"])
+    for target_ws in target_workspaces:
+        log_activity(
+            db, "User Logged Out", "User",
+            f"User {user.name} logged out.",
+            user.name, user.id,
+            entity_name=user.name,
+            workspace=target_ws,
+        )
     return {"message": "Logged out successfully."}
 
 
@@ -553,21 +575,23 @@ def active_sessions(db: Session = Depends(get_db), _: User = Depends(require_sup
 def recent_logins(
     workspace: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: User = Depends(require_super_admin),
+    current_user: User = Depends(get_current_user),
 ):
     """Returns the most recent login per user (up to 20 users), newest first.
 
-    When `workspace` is supplied the list is filtered to users who have logged
-    in from that workspace (based on system_logs).  Users who have access to
-    BOTH workspaces (e.g. Super Admin / Deepika) appear in BOTH lists.
-
-    Online status is sourced from the live SSE connection list (notifications
-    module) — not from the DB is_active flag — so a backend restart never
-    causes an actively-connected user to appear as Offline in the History tab.
+    When `workspace` is supplied the list is filtered to users who have access to
+    that workspace. Users who have access to multiple workspaces appear in each
+    workspace's History list.
     """
     from app import notifications as notif
     from app.models.models import SystemLog
     from app.notifications import _normalize_workspace
+    from app.utils.auth import is_super_admin_user
+    from app.routers.application_access import access_map
+
+    is_admin = is_super_admin_user(current_user) or getattr(current_user, "is_admin", False) or any(r == "admin" for r in access_map(current_user).values())
+    if not is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required.")
 
     # Normalise the requested workspace filter
     filter_ws = _normalize_workspace(workspace) if workspace else None
@@ -580,7 +604,6 @@ def recent_logins(
     }
 
     # Fetch all users to inspect permissions
-    from app.routers.application_access import access_map
     all_users = {u.id: u for u in db.query(User).all()}
 
     all_sessions = (
@@ -606,10 +629,9 @@ def recent_logins(
         has_marketing = bool(u.is_super_admin or acc.get("marketing") not in (None, "none"))
         has_store = bool(u.is_super_admin or acc.get("store_purchase") not in (None, "none"))
         has_accounts = bool(u.is_super_admin or acc.get("accounts") not in (None, "none"))
+        has_hr = bool(u.is_super_admin or acc.get("hr") not in (None, "none"))
 
         # Filter by requested workspace:
-        # Users with both access appear in BOTH tabs.
-        # Single-workspace users appear only in their respective workspace.
         if filter_ws == "Store":
             if not has_store:
                 continue
@@ -618,6 +640,9 @@ def recent_logins(
                 continue
         elif filter_ws == "Accounts":
             if not has_accounts:
+                continue
+        elif filter_ws == "HR":
+            if not has_hr:
                 continue
         elif filter_ws:
             continue

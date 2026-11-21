@@ -137,6 +137,8 @@ def require_admin(authorization: str, db: Session, detail: str = "Admin access r
             is_super_admin_user(user)
             or application_role(user, db, "marketing") == "admin"
             or application_role(user, db, "store_purchase") == "admin"
+            or application_role(user, db, "accounts") == "admin"
+            or application_role(user, db, "hr") == "admin"
         )
         if not is_adm:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
