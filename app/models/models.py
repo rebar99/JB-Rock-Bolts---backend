@@ -100,6 +100,7 @@ class StorePurchaseItem(Base):
     issued_quantity = Column(Float, nullable=False, default=0)
     status = Column(String(30), nullable=False, default="In Stock")
     out_of_stock_limit = Column(Float, nullable=False, default=0.0)
+    month_key = Column(String(7), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     transactions = relationship("StorePurchaseStockTransaction", back_populates="item", cascade="all, delete-orphan", order_by="StorePurchaseStockTransaction.transaction_date.desc()")

@@ -754,47 +754,44 @@ def _same_inventory_item(db: Session, group_name: str, stock_item: str | None, r
 
 
 
+def _ensure_monthly_rollover(db: Session):
+    """
+    Automatic monthly rollover for Store Inventory:
+    When a new calendar month starts (e.g. October -> November, November -> December):
+    For any item whose month_key is older than current month (or None):
+      1. If month_key is None:
+         Stamp month_key = current_key (initialization)
+      2. If month_key < current_key (new month has arrived):
+         - previous_quantity += current_month_quantity
+         - current_month_quantity = 0.0
+         - month_key = current_key
+    This ensures that past months' closing stock seamlessly rolls over into
+    Opening Stock (Previous Qty) for the new month, and Current Month Qty resets to 0.
+    """
+    current_key = date.today().strftime("%Y-%m")
+    items = db.query(StorePurchaseItem).filter(
+        (StorePurchaseItem.month_key == None) | (StorePurchaseItem.month_key < current_key)
+    ).all()
+    if not items:
+        return
+    for it in items:
+        if it.month_key is None:
+            it.month_key = current_key
+        else:
+            it.previous_quantity = float(it.previous_quantity or 0) + float(it.current_month_quantity or 0)
+            it.current_month_quantity = 0.0
+            it.month_key = current_key
+    db.commit()
+
+
 def _item_response(item: StorePurchaseItem):
-
-
-
-
-
-
-
-    # These fields are an explicit inventory allocation. A manual opening
-
-
-
-
-
-
-
-    # balance (Previous Qty) plus this month's entry must remain visible as
-
-
-
-
-
-
-
-    # entered; the ledger itself keeps the full movement audit separately.
-
-
-
-
-
-
-
-    previous_quantity = item.previous_quantity or 0
-
-
-
-
-
-
-
-    current_month_quantity = item.current_month_quantity or 0
+    previous_quantity = float(item.previous_quantity or 0)
+    current_month_quantity = float(item.current_month_quantity or 0)
+    total_quantity = float(item.total_received_quantity if item.total_received_quantity is not None else (previous_quantity + current_month_quantity))
+    if round(previous_quantity + current_month_quantity, 2) != round(total_quantity, 2):
+        total_quantity = round(previous_quantity + current_month_quantity, 2)
+    issued_quantity = float(item.issued_quantity or 0)
+    available_quantity = float(item.quantity if item.quantity is not None else (total_quantity - issued_quantity))
 
     rate = float(item.rate or 0.0)
     receipt_txs = [tx for tx in getattr(item, "transactions", []) if tx.transaction_type == "RECEIPT"]
@@ -807,15 +804,15 @@ def _item_response(item: StorePurchaseItem):
         tot_amt = sum(float(tx.amount if tx.amount is not None else ((tx.quantity or 0) * (tx.rate or 0))) for tx in receipt_txs)
         remaining_stock_amount = round(tot_amt, 2)
     else:
-        remaining_stock_amount = round((item.quantity or 0) * rate, 2)
+        remaining_stock_amount = round(available_quantity * rate, 2)
 
     return {
-        "id": item.id, "name": item.name, "quantity": item.quantity,
-        "available_quantity": item.quantity, "total_stock": item.total_received_quantity or item.quantity,
-        "total_quantity": item.total_received_quantity or item.quantity,
+        "id": item.id, "name": item.name, "quantity": available_quantity,
+        "available_quantity": available_quantity, "total_stock": total_quantity,
+        "total_quantity": total_quantity,
         "previous_quantity": previous_quantity, "current_month_quantity": current_month_quantity,
-        "issued_quantity": item.issued_quantity,
-        "remaining_quantity": item.quantity, "remaining_stock_amount": remaining_stock_amount,
+        "issued_quantity": issued_quantity,
+        "remaining_quantity": available_quantity, "remaining_stock_amount": remaining_stock_amount,
 
 
 
@@ -1014,62 +1011,15 @@ def _record_receipt(db: Session, *, name: str, quantity: float, rate: float, ven
 
 
         if is_current_month:
-
-
-
-
-
-
-
-            if not item.current_month_quantity:
-
-
-
-
-
-
-
+            if not item.current_month_quantity and not item.previous_quantity:
                 item.previous_quantity = item.quantity
-
-
-
-
-
-
-
             item.current_month_quantity = (item.current_month_quantity or 0) + quantity
-
-
-
-
-
-
-
         else:
-
-
-
-
-
-
-
             item.previous_quantity = (item.previous_quantity or 0) + quantity
 
-
-
-
-
-
-
-        item.quantity += quantity
-
-
-
-
-
-
-
-        item.total_received_quantity = (item.total_received_quantity or item.previous_quantity or 0) + quantity
+        item.total_received_quantity = float(item.previous_quantity or 0) + float(item.current_month_quantity or 0)
+        item.quantity = item.total_received_quantity - float(item.issued_quantity or 0)
+        item.month_key = date.today().strftime("%Y-%m")
 
 
 
@@ -1541,30 +1491,15 @@ def _refresh_po_received_status(db: Session, order: StorePurchaseOrder):
 
 
     if fully_received:
-
-
-
-
-
-
-
         order.status = "Completed"
-
-
-
-
-
-
-
-    elif order.status == "Completed":
-
-
-
-
-
-
-
-        order.status = "Partially Received"
+    elif order.status in {"Completed", "Partially Received"}:
+        # Some receipts deleted - check if any receipt still remains
+        active_receipts = [r for r in order.material_receipts if not getattr(r, "is_deleted", False)]
+        if active_receipts:
+            order.status = "Partially Received"
+        else:
+            # All receipts deleted - revert to Finally Approved so new receipts can be added again
+            order.status = "Finally Approved"
 
 
 
@@ -4352,6 +4287,7 @@ def _merge_same_items(db: Session):
 
 @router.get("/inventory")
 def inventory(_: User = Depends(store_user), db: Session = Depends(get_db)):
+    _ensure_monthly_rollover(db)
     _merge_same_items(db)
     items = db.query(StorePurchaseItem).order_by(StorePurchaseItem.name).all()
     needs_commit = False
@@ -4507,22 +4443,32 @@ def create_item(payload: ItemPayload, _: User = Depends(store_admin), db: Sessio
 
 
 
-    if not existing: item.previous_quantity = payload.previous_quantity
-
-
-
-
-
-
-
-    item.current_month_quantity = payload.current_month_quantity
-
-
-
-
-
-
-
+    if not existing:
+        if (payload.previous_quantity or 0) > 0 or (payload.current_month_quantity or 0) > 0:
+            item.previous_quantity = float(payload.previous_quantity or 0)
+            item.current_month_quantity = float(payload.current_month_quantity or 0)
+        else:
+            is_cur = (payload.receipt_date or date.today()).year == date.today().year and (payload.receipt_date or date.today()).month == date.today().month
+            if is_cur:
+                item.previous_quantity = 0.0
+                item.current_month_quantity = float(payload.quantity or 0)
+            else:
+                item.previous_quantity = float(payload.quantity or 0)
+                item.current_month_quantity = 0.0
+        item.total_received_quantity = item.previous_quantity + item.current_month_quantity
+        item.quantity = item.total_received_quantity
+    else:
+        # Existing item: _record_receipt() already added payload.quantity to current_month_quantity.
+        # If user explicitly provided a previous/current split, undo that and apply correctly.
+        if (payload.previous_quantity or 0) > 0 or (payload.current_month_quantity or 0) > 0:
+            # Step 1: undo what _record_receipt added to current_month_quantity
+            item.current_month_quantity = max(0.0, float(item.current_month_quantity or 0) - float(payload.quantity or 0))
+            # Step 2: ADD user's explicit split on top of pre-existing values
+            item.previous_quantity = float(item.previous_quantity or 0) + float(payload.previous_quantity or 0)
+            item.current_month_quantity = float(item.current_month_quantity or 0) + float(payload.current_month_quantity or 0)
+        item.total_received_quantity = float(item.previous_quantity or 0) + float(item.current_month_quantity or 0)
+        item.quantity = item.total_received_quantity - float(item.issued_quantity or 0)
+    item.month_key = date.today().strftime("%Y-%m")
     db.commit(); db.refresh(item)
 
 
@@ -4699,31 +4645,18 @@ def update_item(item_id: int, payload: ItemPayload, _: User = Depends(store_admi
 
 
 
-    item.previous_quantity = payload.previous_quantity
-
-
-
-
-
-
-
-    item.current_month_quantity = payload.current_month_quantity
-
-
-
-
-
-
-
-    item.total_received_quantity = payload.quantity
-
-
-
-
-
-
-
-    item.quantity = payload.quantity - (item.issued_quantity or 0)
+    item.previous_quantity = float(payload.previous_quantity or 0)
+    item.current_month_quantity = float(payload.current_month_quantity or 0)
+    expected_tot = float(payload.quantity or 0)
+    if round(item.previous_quantity + item.current_month_quantity, 2) != round(expected_tot, 2):
+        if expected_tot >= item.previous_quantity:
+            item.current_month_quantity = round(expected_tot - item.previous_quantity, 2)
+        else:
+            item.previous_quantity = expected_tot
+            item.current_month_quantity = 0.0
+    item.total_received_quantity = item.previous_quantity + item.current_month_quantity
+    item.quantity = item.total_received_quantity - (item.issued_quantity or 0)
+    item.month_key = date.today().strftime("%Y-%m")
 
 
 
@@ -7263,7 +7196,7 @@ def create_material_receipt(payload: MaterialReceiptPayload, user: User = Depend
 
 
 
-    if order.status not in {"Approved", "Final Approved", "Finally Approved"}:
+    if order.status not in {"Approved", "Final Approved", "Finally Approved", "Partially Received"}:
 
 
 
