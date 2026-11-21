@@ -4695,7 +4695,12 @@ def create_item(payload: ItemPayload, _: User = Depends(store_admin), db: Sessio
 @router.post("/inventory/fix-swapped-groups")
 def fix_swapped_inventory_groups(db: Session = Depends(get_db)):
     """Heal store_purchase_items records and return debug info about groups and items."""
-    from app.models.models import StorePOItemMasterItem, StorePurchaseItem
+    from app.models.models import StorePOItemMasterItem, StorePOItemMasterSize, StorePurchaseItem
+    all_sizes = db.query(StorePOItemMasterSize).all()
+    sizes_with_item = [
+        {"id": s.id, "size": s.size, "group": s.item.name if s.item else None}
+        for s in all_sizes if "pipe" in (s.size or "").lower()
+    ]
     healed = _heal_swapped_groups(db)
     official_groups = [g.name for g in db.query(StorePOItemMasterItem).all()]
     pipe_items = [
@@ -4704,14 +4709,14 @@ def fix_swapped_inventory_groups(db: Session = Depends(get_db)):
             (StorePurchaseItem.name.ilike("%pipe%")) | (StorePurchaseItem.stock_item.ilike("%pipe%"))
         ).all()
     ]
-    all_item_names = list(set(it.name for it in db.query(StorePurchaseItem).all()))
     return {
         "status": "ok",
+        "total_sizes_in_master": len(all_sizes),
+        "pipe_sizes_in_master": sizes_with_item,
         "healed_count": len(healed),
         "items": healed,
         "official_groups": official_groups,
         "pipe_items": pipe_items,
-        "unique_group_names_in_inventory": all_item_names,
     }
 
 
