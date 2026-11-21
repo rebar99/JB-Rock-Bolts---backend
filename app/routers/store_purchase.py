@@ -11672,3 +11672,117 @@ def delete_vendor(vendor_id: int, db: Session = Depends(get_db), user: User = De
 
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TEMPORARY ADMIN ENDPOINT — Fix duplicate RECEIPT transactions
+# This endpoint is safe: it only removes orphan manual-entry RECEIPT
+# transactions that are superseded by a proper Material Receipt line.
+# Remove this endpoint after running once on live.
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.post("/admin/fix-duplicate-receipts")
+def fix_duplicate_receipts(secret: str = "", db: Session = Depends(get_db)):
+    """
+    One-time cleanup: removes orphan manual RECEIPT transactions (receipt_line_id=NULL)
+    for items that also have MR-linked transactions (receipt_line_id IS NOT NULL),
+    where qty + vendor_name match — these are duplicates.
+    Requires secret=jbfix2026 query param for safety.
+    """
+    if secret != "jbfix2026":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Step 1: Find all items with both manual and MR-linked RECEIPT transactions
+    from sqlalchemy import text as sa_text
+    result = db.execute(sa_text("""
+        SELECT DISTINCT t1.item_id
+        FROM store_purchase_stock_transactions t1
+        WHERE t1.transaction_type = 'RECEIPT'
+          AND t1.receipt_line_id IS NULL
+          AND EXISTS (
+              SELECT 1 FROM store_purchase_stock_transactions t2
+              WHERE t2.item_id = t1.item_id
+                AND t2.transaction_type = 'RECEIPT'
+                AND t2.receipt_line_id IS NOT NULL
+                AND t2.quantity = t1.quantity
+                AND t2.vendor_name = t1.vendor_name
+          )
+    """)).fetchall()
+
+    affected_item_ids = [row[0] for row in result]
+    deleted_txs = []
+    qty_corrections = []
+
+    for item_id in affected_item_ids:
+        item = db.query(StorePurchaseItem).filter(StorePurchaseItem.id == item_id).first()
+        if not item:
+            continue
+
+        # Find orphan manual TXs that have matching MR TX
+        orphan_txs = db.execute(sa_text("""
+            SELECT t1.id, t1.quantity, t1.vendor_name, t1.transaction_date, t1.rate
+            FROM store_purchase_stock_transactions t1
+            WHERE t1.item_id = :item_id
+              AND t1.transaction_type = 'RECEIPT'
+              AND t1.receipt_line_id IS NULL
+              AND EXISTS (
+                  SELECT 1 FROM store_purchase_stock_transactions t2
+                  WHERE t2.item_id = t1.item_id
+                    AND t2.transaction_type = 'RECEIPT'
+                    AND t2.receipt_line_id IS NOT NULL
+                    AND t2.quantity = t1.quantity
+                    AND t2.vendor_name = t1.vendor_name
+              )
+        """), {"item_id": item_id}).fetchall()
+
+        for tx in orphan_txs:
+            deleted_txs.append({
+                "tx_id": tx[0],
+                "item_id": item_id,
+                "item_name": item.stock_item,
+                "quantity": float(tx[1]),
+                "vendor": tx[2],
+                "date": str(tx[3]),
+                "rate": float(tx[4]) if tx[4] else 0,
+            })
+            db.execute(sa_text("DELETE FROM store_purchase_stock_transactions WHERE id = :id"), {"id": tx[0]})
+
+        # Recalculate correct quantities from remaining transactions
+        remaining = db.execute(sa_text("""
+            SELECT
+                SUM(CASE WHEN transaction_type='RECEIPT' THEN quantity ELSE 0 END) as total_rcvd,
+                SUM(CASE WHEN transaction_type='ISSUE' THEN quantity ELSE 0 END) as total_issued
+            FROM store_purchase_stock_transactions
+            WHERE item_id = :item_id
+        """), {"item_id": item_id}).fetchone()
+
+        total_rcvd = float(remaining[0] or 0)
+        total_issued = float(remaining[1] or 0)
+        correct_qty = total_rcvd - total_issued
+
+        old_qty = float(item.quantity or 0)
+        item.total_received_quantity = total_rcvd
+        item.quantity = correct_qty
+        # Adjust previous_quantity and current_month_quantity proportionally
+        # Simple: set previous_quantity = total_rcvd - current_month_quantity
+        cmq = float(item.current_month_quantity or 0)
+        item.previous_quantity = max(0, total_rcvd - cmq)
+
+        qty_corrections.append({
+            "item_id": item_id,
+            "item_name": item.stock_item,
+            "old_qty": old_qty,
+            "new_qty": correct_qty,
+            "total_received": total_rcvd,
+            "issued": total_issued,
+        })
+
+    db.commit()
+
+    return {
+        "status": "done",
+        "affected_items": len(affected_item_ids),
+        "deleted_transactions": len(deleted_txs),
+        "details": deleted_txs,
+        "qty_corrections": qty_corrections,
+    }
