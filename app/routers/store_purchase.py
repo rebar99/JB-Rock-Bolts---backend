@@ -50,7 +50,10 @@ from sqlalchemy.orm import Session, object_session
 
 
 
-from sqlalchemy import func
+import logging
+from sqlalchemy import func, text
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -768,20 +771,43 @@ def _ensure_monthly_rollover(db: Session):
     This ensures that past months' closing stock seamlessly rolls over into
     Opening Stock (Previous Qty) for the new month, and Current Month Qty resets to 0.
     """
-    current_key = date.today().strftime("%Y-%m")
-    items = db.query(StorePurchaseItem).filter(
-        (StorePurchaseItem.month_key == None) | (StorePurchaseItem.month_key < current_key)
-    ).all()
-    if not items:
-        return
-    for it in items:
-        if it.month_key is None:
-            it.month_key = current_key
-        else:
-            it.previous_quantity = float(it.previous_quantity or 0) + float(it.current_month_quantity or 0)
-            it.current_month_quantity = 0.0
-            it.month_key = current_key
-    db.commit()
+    try:
+        current_key = date.today().strftime("%Y-%m")
+        try:
+            items = db.query(StorePurchaseItem).filter(
+                (StorePurchaseItem.month_key == None) | (StorePurchaseItem.month_key < current_key)
+            ).all()
+        except Exception as q_err:
+            db.rollback()
+            # If month_key column is missing in database, dynamically create it
+            try:
+                db.execute(text("ALTER TABLE store_purchase_items ADD COLUMN month_key VARCHAR(7) NULL"))
+                db.execute(text("UPDATE store_purchase_items SET month_key = :k WHERE month_key IS NULL"), {"k": current_key})
+                db.commit()
+                items = db.query(StorePurchaseItem).filter(
+                    (StorePurchaseItem.month_key == None) | (StorePurchaseItem.month_key < current_key)
+                ).all()
+            except Exception as _e:
+                logger.warning(f"[Rollover] Dynamic column add/query failed: {_e}")
+                db.rollback()
+                return
+
+        if not items:
+            return
+        for it in items:
+            if it.month_key is None:
+                it.month_key = current_key
+            else:
+                it.previous_quantity = float(it.previous_quantity or 0) + float(it.current_month_quantity or 0)
+                it.current_month_quantity = 0.0
+                it.month_key = current_key
+        db.commit()
+    except Exception as e:
+        logger.error(f"[Rollover] _ensure_monthly_rollover error: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 def _item_response(item: StorePurchaseItem):
@@ -4245,76 +4271,113 @@ def dashboard(_: User = Depends(store_user), db: Session = Depends(get_db)):
 
 def _merge_same_items(db: Session):
     """Ensure items with the same Group Name and Items Name are consolidated into a single row."""
-    all_items = db.query(StorePurchaseItem).order_by(StorePurchaseItem.id.asc()).all()
-    groups = {}
-    for it in all_items:
-        key = (it.name.strip().lower(), (it.stock_item or "General").strip().lower())
-        groups.setdefault(key, []).append(it)
+    try:
+        all_items = db.query(StorePurchaseItem).order_by(StorePurchaseItem.id.asc()).all()
+        groups = {}
+        for it in all_items:
+            key = (it.name.strip().lower(), (it.stock_item or "General").strip().lower())
+            groups.setdefault(key, []).append(it)
 
-    needs_commit = False
-    for key, items in groups.items():
-        if len(items) > 1:
-            primary = items[0]
-            for duplicate in items[1:]:
-                # Move transactions to primary
-                db.query(StorePurchaseStockTransaction).filter(
-                    StorePurchaseStockTransaction.item_id == duplicate.id
-                ).update({"item_id": primary.id})
+        needs_commit = False
+        for key, items in groups.items():
+            if len(items) > 1:
+                primary = items[0]
+                for duplicate in items[1:]:
+                    # Move transactions to primary
+                    db.query(StorePurchaseStockTransaction).filter(
+                        StorePurchaseStockTransaction.item_id == duplicate.id
+                    ).update({"item_id": primary.id})
 
-                # Delete duplicate stock item child records
-                db.query(StorePurchaseStockItem).filter(
-                    StorePurchaseStockItem.material_id == duplicate.id
-                ).delete()
+                    # Move stock transfers to primary if table/records exist
+                    try:
+                        db.query(StorePurchaseStockTransfer).filter(
+                            StorePurchaseStockTransfer.item_id == duplicate.id
+                        ).update({"item_id": primary.id})
+                    except Exception:
+                        pass
 
-                # Consolidate quantities into primary
-                primary.quantity = (primary.quantity or 0) + (duplicate.quantity or 0)
-                primary.total_received_quantity = (primary.total_received_quantity or 0) + (duplicate.total_received_quantity or 0)
-                primary.current_month_quantity = (primary.current_month_quantity or 0) + (duplicate.current_month_quantity or 0)
+                    # Delete duplicate stock item child records
+                    db.query(StorePurchaseStockItem).filter(
+                        StorePurchaseStockItem.material_id == duplicate.id
+                    ).delete()
 
-                # Delete the duplicate item
-                db.delete(duplicate)
-                needs_commit = True
+                    # Consolidate quantities into primary
+                    primary.quantity = (primary.quantity or 0) + (duplicate.quantity or 0)
+                    primary.total_received_quantity = (primary.total_received_quantity or 0) + (duplicate.total_received_quantity or 0)
+                    primary.current_month_quantity = (primary.current_month_quantity or 0) + (duplicate.current_month_quantity or 0)
 
-            db.flush()
-            # Update primary stock item available quantity
-            si = db.query(StorePurchaseStockItem).filter(StorePurchaseStockItem.material_id == primary.id).first()
-            if si:
-                si.total_received_quantity = primary.total_received_quantity
-                si.available_quantity = primary.quantity
+                    # Delete the duplicate item
+                    db.delete(duplicate)
+                    needs_commit = True
 
-    if needs_commit:
-        db.commit()
+                db.flush()
+                # Update primary stock item available quantity
+                si = db.query(StorePurchaseStockItem).filter(StorePurchaseStockItem.material_id == primary.id).first()
+                if si:
+                    si.total_received_quantity = primary.total_received_quantity
+                    si.available_quantity = primary.quantity
+
+        if needs_commit:
+            db.commit()
+    except Exception as e:
+        logger.error(f"[Merge] _merge_same_items error: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 @router.get("/inventory")
 def inventory(_: User = Depends(store_user), db: Session = Depends(get_db)):
-    _ensure_monthly_rollover(db)
-    _merge_same_items(db)
+    try:
+        _ensure_monthly_rollover(db)
+    except Exception as e:
+        logger.error(f"[Inventory] Rollover error: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    try:
+        _merge_same_items(db)
+    except Exception as e:
+        logger.error(f"[Inventory] Merge error: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
     items = db.query(StorePurchaseItem).order_by(StorePurchaseItem.name).all()
     needs_commit = False
     for it in items:
-        if (it.quantity or 0) <= 0 and (it.total_received_quantity or 0) <= 0:
-            if (it.rate or 0) != 0:
-                it.rate = 0.0
-                needs_commit = True
-            tx_count = db.query(StorePurchaseStockTransaction).filter(StorePurchaseStockTransaction.item_id == it.id).count()
-            if tx_count == 0 and it.reference_no:
-                it.reference_no = None
-                it.vendor_name = None
-                needs_commit = True
-        else:
-            rec_txs = [tx for tx in it.transactions if tx.transaction_type == "RECEIPT"]
-            if rec_txs:
-                distinct_rates = list(dict.fromkeys(round(float(tx.rate or 0), 2) for tx in rec_txs if (tx.rate or 0) > 0))
-                calc_r = sum(distinct_rates) if distinct_rates else it.rate
-                if it.rate != calc_r:
-                    it.rate = calc_r
+        try:
+            if (it.quantity or 0) <= 0 and (it.total_received_quantity or 0) <= 0:
+                if (it.rate or 0) != 0:
+                    it.rate = 0.0
                     needs_commit = True
-            for si in it.stock_items:
-                if len(it.stock_items) <= 1 and si.rate != it.rate:
-                    si.rate = it.rate
+                tx_count = db.query(StorePurchaseStockTransaction).filter(StorePurchaseStockTransaction.item_id == it.id).count()
+                if tx_count == 0 and it.reference_no:
+                    it.reference_no = None
+                    it.vendor_name = None
                     needs_commit = True
+            else:
+                rec_txs = [tx for tx in getattr(it, "transactions", []) if tx.transaction_type == "RECEIPT"]
+                if rec_txs:
+                    distinct_rates = list(dict.fromkeys(round(float(tx.rate or 0), 2) for tx in rec_txs if (tx.rate or 0) > 0))
+                    calc_r = sum(distinct_rates) if distinct_rates else it.rate
+                    if it.rate != calc_r:
+                        it.rate = calc_r
+                        needs_commit = True
+                for si in getattr(it, "stock_items", []):
+                    if len(it.stock_items) <= 1 and si.rate != it.rate:
+                        si.rate = it.rate
+                        needs_commit = True
+        except Exception as it_err:
+            logger.warning(f"[Inventory] item {getattr(it, 'id', None)} rate check error: {it_err}")
     if needs_commit:
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
     return [_item_response(item) for item in items]
 
 

@@ -423,6 +423,7 @@ async def lifespan(app: FastAPI):
                 ("current_month_quantity", "FLOAT NOT NULL DEFAULT 0"),
                 ("total_received_quantity", "FLOAT NOT NULL DEFAULT 0"),
                 ("issued_quantity", "FLOAT NOT NULL DEFAULT 0"), ("status", "VARCHAR(30) NOT NULL DEFAULT 'In Stock'"), ("out_of_stock_limit", "FLOAT NOT NULL DEFAULT 0"),
+                ("month_key", "VARCHAR(7) NULL"),
             ]:
                 try:
                     conn.execute(text(f"SELECT {col} FROM store_purchase_items LIMIT 1"))
@@ -431,6 +432,11 @@ async def lifespan(app: FastAPI):
                         conn.execute(text(f"ALTER TABLE store_purchase_items ADD COLUMN {col} {dtype}"))
                     except Exception:
                         pass
+
+            try:
+                conn.execute(text("UPDATE store_purchase_items SET month_key = DATE_FORMAT(NOW(), '%Y-%m') WHERE month_key IS NULL"))
+            except Exception:
+                pass
 
             try:
                 conn.execute(text("""
