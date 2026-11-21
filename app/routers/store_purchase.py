@@ -682,6 +682,15 @@ def _inventory_group_and_item(db: Session, description: str) -> tuple[str, str]:
         if s.size and " ".join(s.size.lower().split()) == raw_norm and s.item:
             return s.item.name.strip(), s.size.strip()
 
+    # 1c. Check StorePOItemMasterSize with clean/prefix match (e.g. "Micro Pipe OD 140*" -> "Micro Pipe OD 140*6.3 mm")
+    clean_raw = re.sub(r'[^a-zA-Z0-9]', '', raw_lower)
+    if len(clean_raw) >= 6:
+        for s in all_sizes:
+            if s.size and s.item:
+                c_s = re.sub(r'[^a-zA-Z0-9]', '', s.size).lower()
+                if c_s and (c_s.startswith(clean_raw) or clean_raw.startswith(c_s)):
+                    return s.item.name.strip(), s.size.strip()
+
     # 2. Check if description starts with a Group Name prefix (e.g. "General Stores Allen Bolt...")
     candidates = sorted(db.query(StorePOItemMasterItem).all(), key=lambda item: len(item.name), reverse=True)
     for master in candidates:
@@ -4349,12 +4358,107 @@ def _merge_same_items(db: Session):
         except Exception:
             pass
 
+def _heal_swapped_groups(db: Session) -> list:
+    """Heal store_purchase_items records where an item name was stored in name or non-official group names exist."""
+    import re
+    from sqlalchemy import func
+    from app.models.models import StorePurchaseItem, StorePOItemMasterItem, StorePOItemMasterSize, StorePurchaseStockTransaction, StorePurchaseStockItem
+    try:
+        from app.models.models import StorePurchaseStockTransfer
+    except Exception:
+        StorePurchaseStockTransfer = None
+
+    def _clean(val) -> str:
+        return re.sub(r'[^a-zA-Z0-9]', '', str(val or '')).lower()
+
+    official_groups = {_clean(g.name): g.name.strip() for g in db.query(StorePOItemMasterItem).all() if g.name}
+
+    sizes = db.query(StorePOItemMasterSize).join(StorePOItemMasterItem).all()
+    size_map = {}
+    size_list = []
+    for s in sizes:
+        if s.size and s.item:
+            c = _clean(s.size)
+            if c:
+                size_map[c] = (s.item.name.strip(), s.size.strip())
+                size_list.append((c, s.item.name.strip(), s.size.strip()))
+
+    inv_items = db.query(StorePurchaseItem).all()
+    healed = []
+    for item in inv_items:
+        name_clean = _clean(item.name)
+        stock_val = (item.stock_item or "").strip().lower()
+
+        matched = None
+        if name_clean not in official_groups:
+            combined_clean = _clean(f"{item.name} {item.stock_item}")
+            matched = size_map.get(combined_clean) or size_map.get(name_clean)
+            if not matched and len(name_clean) >= 6:
+                for c_size, real_g, real_s in size_list:
+                    if c_size.startswith(name_clean) or name_clean.startswith(c_size):
+                        matched = (real_g, real_s)
+                        break
+        elif stock_val in ("general", "", "legacy") and name_clean in size_map:
+            matched = size_map.get(name_clean)
+            if not matched and len(name_clean) >= 6:
+                for c_size, real_g, real_s in size_list:
+                    if c_size.startswith(name_clean) or name_clean.startswith(c_size):
+                        matched = (real_g, real_s)
+                        break
+
+        if matched:
+            real_group, real_item = matched
+            if item.name == real_group and (item.stock_item or "").strip().lower() == real_item.strip().lower():
+                continue
+            old_name = item.name
+            old_stock = item.stock_item
+            existing = db.query(StorePurchaseItem).filter(
+                StorePurchaseItem.id != item.id,
+                func.lower(StorePurchaseItem.name) == real_group.lower(),
+                func.lower(func.coalesce(StorePurchaseItem.stock_item, "general")) == real_item.lower(),
+            ).first()
+            if existing:
+                existing.previous_quantity = float(existing.previous_quantity or 0) + float(item.previous_quantity or 0)
+                existing.current_month_quantity = float(existing.current_month_quantity or 0) + float(item.current_month_quantity or 0)
+                existing.total_received_quantity = float(existing.total_received_quantity or 0) + float(item.total_received_quantity or 0)
+                existing.quantity = float(existing.quantity or 0) + float(item.quantity or 0)
+                existing.issued_quantity = float(existing.issued_quantity or 0) + float(item.issued_quantity or 0)
+                db.query(StorePurchaseStockTransaction).filter(StorePurchaseStockTransaction.item_id == item.id).update({"item_id": existing.id})
+                if StorePurchaseStockTransfer:
+                    try:
+                        db.query(StorePurchaseStockTransfer).filter(StorePurchaseStockTransfer.item_id == item.id).update({"item_id": existing.id})
+                    except Exception:
+                        pass
+                db.query(StorePurchaseStockItem).filter(StorePurchaseStockItem.material_id == item.id).delete()
+                db.delete(item)
+                action = "merged"
+            else:
+                item.name = real_group
+                item.stock_item = real_item
+                db.query(StorePurchaseStockItem).filter(
+                    StorePurchaseStockItem.material_id == item.id
+                ).update({"name": real_item})
+                action = "updated"
+            healed.append({"id": item.id, "action": action, "old_name": old_name, "old_stock": old_stock, "new_group": real_group, "new_item": real_item})
+    if healed:
+        db.commit()
+    return healed
+
 @router.get("/inventory")
 def inventory(_: User = Depends(store_user), db: Session = Depends(get_db)):
     try:
         _ensure_monthly_rollover(db)
     except Exception as e:
         logger.error(f"[Inventory] Rollover error: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    try:
+        _heal_swapped_groups(db)
+    except Exception as e:
+        logger.error(f"[Inventory] Heal swapped groups error: {e}")
         try:
             db.rollback()
         except Exception:
@@ -4591,63 +4695,7 @@ def create_item(payload: ItemPayload, _: User = Depends(store_admin), db: Sessio
 @router.post("/inventory/fix-swapped-groups")
 def fix_swapped_inventory_groups(db: Session = Depends(get_db)):
     """Heal store_purchase_items records where an item name was stored in name or non-official group names exist."""
-    import re
-    from sqlalchemy import func
-    from app.models.models import StorePurchaseItem, StorePOItemMasterItem, StorePOItemMasterSize, StorePurchaseStockTransaction
-
-    def _clean(val) -> str:
-        return re.sub(r'[^a-zA-Z0-9]', '', str(val or '')).lower()
-
-    official_groups = {_clean(g.name): g.name.strip() for g in db.query(StorePOItemMasterItem).all() if g.name}
-
-    sizes = db.query(StorePOItemMasterSize).join(StorePOItemMasterItem).all()
-    size_map = {}
-    for s in sizes:
-        if s.size and s.item:
-            c = _clean(s.size)
-            if c:
-                size_map[c] = (s.item.name.strip(), s.size.strip())
-
-    inv_items = db.query(StorePurchaseItem).all()
-    healed = []
-    for item in inv_items:
-        name_clean = _clean(item.name)
-        stock_val = (item.stock_item or "").strip().lower()
-
-        matched = None
-        if name_clean not in official_groups:
-            combined_clean = _clean(f"{item.name} {item.stock_item}")
-            matched = size_map.get(combined_clean) or size_map.get(name_clean)
-        elif stock_val in ("general", "", "legacy") and name_clean in size_map:
-            matched = size_map.get(name_clean)
-
-        if matched:
-            real_group, real_item = matched
-            if item.name == real_group and item.stock_item == real_item:
-                continue
-            old_name = item.name
-            old_stock = item.stock_item
-            existing = db.query(StorePurchaseItem).filter(
-                StorePurchaseItem.id != item.id,
-                func.lower(StorePurchaseItem.name) == real_group.lower(),
-                func.lower(func.coalesce(StorePurchaseItem.stock_item, "general")) == real_item.lower(),
-            ).first()
-            if existing:
-                existing.previous_quantity = float(existing.previous_quantity or 0) + float(item.previous_quantity or 0)
-                existing.current_month_quantity = float(existing.current_month_quantity or 0) + float(item.current_month_quantity or 0)
-                existing.total_received_quantity = float(existing.total_received_quantity or 0) + float(item.total_received_quantity or 0)
-                existing.quantity = float(existing.quantity or 0) + float(item.quantity or 0)
-                existing.issued_quantity = float(existing.issued_quantity or 0) + float(item.issued_quantity or 0)
-                db.query(StorePurchaseStockTransaction).filter(StorePurchaseStockTransaction.item_id == item.id).update({"item_id": existing.id})
-                db.delete(item)
-                action = "merged"
-            else:
-                item.name = real_group
-                item.stock_item = real_item
-                action = "updated"
-            healed.append({"id": item.id, "action": action, "old_name": old_name, "old_stock": old_stock, "new_group": real_group, "new_item": real_item})
-    if healed:
-        db.commit()
+    healed = _heal_swapped_groups(db)
     return {"status": "ok", "healed_count": len(healed), "items": healed}
 
 
