@@ -5246,6 +5246,19 @@ def issue_item(item_id: int, payload: IssuePayload, user: User = Depends(store_a
 
 
 def _transaction_response(tx: StorePurchaseStockTransaction):
+    # Resolve PO number via receipt_line_id → MR line → MR → PO
+    po_number = None
+    if tx.receipt_line_id:
+        try:
+            line = object_session(tx).get(StorePurchaseMaterialReceiptLine, tx.receipt_line_id)
+            if line:
+                mr = object_session(tx).get(StorePurchaseMaterialReceipt, line.receipt_id)
+                if mr:
+                    po = object_session(tx).get(StorePurchaseOrder, mr.order_id)
+                    if po:
+                        po_number = po.order_number
+        except Exception:
+            pass
 
 
 
@@ -5269,7 +5282,8 @@ def _transaction_response(tx: StorePurchaseStockTransaction):
 
 
 
-            "required_for": tx.required_for, "issued_to": tx.issued_to, "location": tx.location, "remarks": tx.remarks}
+            "required_for": tx.required_for, "issued_to": tx.issued_to, "location": tx.location, "remarks": tx.remarks,
+            "po_number": po_number}
 
 
 
