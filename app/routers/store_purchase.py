@@ -1342,6 +1342,29 @@ def _record_receipt(db: Session, *, name: str, quantity: float, rate: float, ven
 
     item.status = _calculate_status(item.quantity, getattr(item, "out_of_stock_limit", 0.0), getattr(item, "reorder_level", 0.0))
 
+    # ── Deduplication guard ───────────────────────────────────────────────────
+    # When this receipt comes from a Material Receipt line (receipt_line_id is
+    # set), remove any orphan manual-entry transactions (receipt_line_id=NULL)
+    # for the same item that have the same quantity AND vendor — these are
+    # duplicates created when the user first added the item via "Add Inventory"
+    # and later also created a proper MR for the same physical delivery.
+    if receipt_line_id is not None:
+        orphan_txs = db.query(StorePurchaseStockTransaction).filter(
+            StorePurchaseStockTransaction.item_id == item.id,
+            StorePurchaseStockTransaction.transaction_type == "RECEIPT",
+            StorePurchaseStockTransaction.receipt_line_id == None,
+            StorePurchaseStockTransaction.quantity == quantity,
+            StorePurchaseStockTransaction.vendor_name == vendor_name,
+        ).all()
+        for orphan in orphan_txs:
+            logger.info(
+                "Removing duplicate manual RECEIPT tx id=%s for item_id=%s "
+                "(qty=%s vendor=%s) — superseded by MR line %s",
+                orphan.id, item.id, quantity, vendor_name, receipt_line_id,
+            )
+            db.delete(orphan)
+    # ─────────────────────────────────────────────────────────────────────────
+
 
 
 
