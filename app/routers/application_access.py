@@ -18,17 +18,16 @@ class AccessUpdate(BaseModel):
 
 def access_map(user: User) -> Dict[str, str]:
     # Super Admin always has admin access to all applications
-    if user.is_super_admin or (user.email and user.email.lower() == "deepikar412003@gmail.com"):
+    if user.is_super_admin:
         return {"marketing": "admin", "store_purchase": "admin", "accounts": "admin", "hr": "admin"}
     # Default to "none" — access is only granted when an explicit row exists.
-    # Workspace restriction works because deleting/setting role="none" removes access.
     result = {"marketing": "none", "store_purchase": "none", "accounts": "none", "hr": "none"}
     for item in user.application_access:
         result[item.application.code] = item.role
     return result
 
 def serialize_user(user: User) -> dict:
-    is_super = bool(user.is_super_admin or (user.email and user.email.lower() == "deepikar412003@gmail.com"))
+    is_super = bool(user.is_super_admin)
     access = access_map(user)
     return {"id": user.id, "name": user.name, "email": user.email,
             "is_active": user.is_active, "is_super_admin": is_super,
@@ -37,38 +36,18 @@ def serialize_user(user: User) -> dict:
 
 @router.get("/me")
 def my_access(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    from app.config import settings
-    super_admins = [e.strip().lower() for e in settings.SUPER_ADMIN_EMAIL.split(",") if e.strip()]
-    super_admins.extend(["deepikar412003@gmail.com", "deepikarajput412003@gmail.com", "admin@jbrockbolts.com"])
-    user_email = (current_user.email or "").lower()
-    if not current_user.is_super_admin and (user_email in super_admins or "deepikar" in user_email):
-        current_user.is_super_admin = True
-        db.commit()
     return serialize_user(current_user)
-
-SUPER_ADMIN_EMAILS_LOCAL = {
-    "deepikar412003@gmail.com",
-    "deepikarajput412003@gmail.com",
-    "admin@jbrockbolts.com",
-}
 
 def is_super_admin_local(user: User) -> bool:
     if not user:
         return False
-    if bool(getattr(user, "is_super_admin", False)):
-        return True
-    email = (getattr(user, "email", "") or "").lower().strip()
-    return email in SUPER_ADMIN_EMAILS_LOCAL or "deepikar" in email
+    return bool(getattr(user, "is_super_admin", False))
 
 @router.get("/users")
 def users(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> List[dict]:
     is_super = is_super_admin_local(current_user)
     if not is_super:
         raise HTTPException(status_code=403, detail="Super Admin access required.")
-    # Auto-promote in DB if needed
-    if not current_user.is_super_admin and is_super:
-        current_user.is_super_admin = True
-        db.commit()
     return [serialize_user(user) for user in db.query(User).order_by(User.name).all()]
 
 @router.put("/users/{user_id}")
@@ -80,8 +59,6 @@ def update_access(user_id: int, payload: AccessUpdate, actor: User = Depends(req
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
-    if user.id == actor.id and not payload.is_super_admin:
-        raise HTTPException(status_code=400, detail="You cannot remove your own Super Admin access.")
     apps = {app.code: app for app in db.query(Application).all()}
     for code, role in {"marketing": payload.marketing, "store_purchase": payload.store_purchase}.items():
         row = db.query(ApplicationAccess).filter_by(user_id=user.id, application_id=apps[code].id).first()

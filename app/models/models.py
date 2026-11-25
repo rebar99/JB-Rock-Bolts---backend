@@ -143,6 +143,9 @@ class StorePurchaseStockTransaction(Base):
     issued_to = Column(String(200), nullable=True)
     location = Column(String(150), nullable=True)
     remarks = Column(Text, nullable=True)
+    manual_meter_quantity = Column(Float, nullable=True)
+    original_quantity = Column(Float, nullable=True)
+    original_uom = Column(String(50), nullable=True)
     receipt_line_id = Column(Integer, ForeignKey("store_purchase_material_receipt_lines.id"), nullable=True, unique=True, index=True)
     created_at = Column(DateTime, server_default=func.now())
     created_by = Column(String(100), nullable=True)
@@ -269,6 +272,18 @@ class StorePOSequenceConfig(Base):
     prefix = Column(String(50), default="STR/0199/")
     next_number = Column(Integer, nullable=False, default=1)
     updated_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class StoreGroupUnitConversionConfig(Base):
+    """Super-admin configured group-wise manual unit conversion (e.g. Kg to Meter in Materials Received)."""
+    __tablename__ = "store_group_unit_conversion_configs"
+    id = Column(Integer, primary_key=True)
+    group_name = Column(String(200), unique=True, nullable=False, index=True)
+    is_enabled = Column(Boolean, nullable=False, default=False)
+    conversion_unit = Column(String(50), nullable=False, default="Meter")
+    updated_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
@@ -425,6 +440,8 @@ class StorePurchaseMaterialReceiptLine(Base):
     uom = Column(String(50), nullable=False, default="Nos")
     unit_rate = Column(Float, nullable=False, default=0)
     amount = Column(Float, nullable=False, default=0)
+    manual_meter_quantity = Column(Float, nullable=True)
+    is_meter_entry = Column(Boolean, default=False, nullable=False, server_default="0")
 
     receipt = relationship("StorePurchaseMaterialReceipt", back_populates="lines")
 

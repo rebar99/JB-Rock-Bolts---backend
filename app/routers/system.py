@@ -22,7 +22,8 @@ from app.models.models import (
     StorePurchaseItem, StorePurchaseStockItem, StorePurchaseStockTransaction,
     StorePurchaseStockTransfer, StorePurchaseOrder, StorePurchaseOrderDetail,
     StorePurchaseOrderLine, StorePurchaseOrderApproval, StorePurchaseOrderActivity,
-    StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine
+    StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine,
+    HREmployee, HRAttendance, HRAttendanceClose, HRSalaryConfig, HRSalary, HRSalaryAudit
 )
 
 router = APIRouter(prefix="/api/system", tags=["System"])
@@ -80,12 +81,22 @@ MARKETING_MODELS = [
     Record,
 ]
 
+HR_MODELS = [
+    HREmployee,
+    HRAttendanceClose,
+    HRSalaryConfig,
+    HRAttendance,
+    HRSalary,
+    HRSalaryAudit,
+]
+
 MODELS = [
     Application,
     User,
     ApplicationAccess,
     *MARKETING_MODELS,
     *STORE_MODELS,
+    *HR_MODELS,
     SystemLog,
     UserSession
 ]
@@ -108,7 +119,7 @@ def export_database(
 ):
     """
     Export database records to a JSON structure filtered by scope.
-    scope: 'store' | 'marketing' | 'all'
+    scope: 'store' | 'marketing' | 'hr' | 'all'
     """
     scope_val = (scope or "all").strip().lower()
     if scope_val == "store":
@@ -117,6 +128,9 @@ def export_database(
     elif scope_val == "marketing":
         selected_models = MARKETING_MODELS
         prefix = "marketing_backup"
+    elif scope_val == "hr":
+        selected_models = HR_MODELS
+        prefix = "hr_backup"
     else:
         selected_models = MODELS
         prefix = "database_backup"
@@ -262,6 +276,12 @@ async def import_database(
             'store_purchase_material_receipt_lines': ['receipt_id', 'line_number'],
             'store_purchase_stock_transactions': ['receipt_line_id'],
             'store_purchase_stock_transfers': ['item_id', 'quantity', 'from_location', 'to_location', 'transfer_date'],
+            'hr_employees': ['employee_code'],
+            'hr_attendance': ['employee_id', 'attendance_date'],
+            'hr_attendance_close': ['month', 'year'],
+            'hr_salary_config': ['config_key'],
+            'hr_salaries': ['employee_id', 'month', 'year'],
+            'hr_salary_audit': ['salary_id', 'action', 'new_status'],
         }
 
         records_inserted = 0
@@ -274,10 +294,13 @@ async def import_database(
             # Auto-detect from tables in backup
             has_store = any(m.__tablename__ in backup_data for m in STORE_MODELS)
             has_marketing = any(m.__tablename__ in backup_data for m in MARKETING_MODELS)
-            if has_store and not has_marketing:
+            has_hr = any(m.__tablename__ in backup_data for m in HR_MODELS)
+            if has_store and not has_marketing and not has_hr:
                 effective_scope = "store"
-            elif has_marketing and not has_store:
+            elif has_marketing and not has_store and not has_hr:
                 effective_scope = "marketing"
+            elif has_hr and not has_store and not has_marketing:
+                effective_scope = "hr"
             else:
                 effective_scope = "all"
 
@@ -285,6 +308,8 @@ async def import_database(
             selected_models = STORE_MODELS
         elif effective_scope == "marketing":
             selected_models = MARKETING_MODELS
+        elif effective_scope == "hr":
+            selected_models = HR_MODELS
         else:
             selected_models = MODELS
 
@@ -299,7 +324,7 @@ async def import_database(
         # If replace mode, clear database first in correct dependency order for the scoped models
         if import_type == "replace":
             if effective_scope == "store":
-                # Only clear Store tables - Marketing & Users remain 100% untouched!
+                # Only clear Store tables - Marketing, HR & Users remain 100% untouched!
                 for model in reversed(STORE_MODELS):
                     try:
                         db.execute(text(f"TRUNCATE TABLE `{model.__tablename__}`;"))
@@ -307,8 +332,16 @@ async def import_database(
                         db.query(model).delete(synchronize_session=False)
                 db.commit()
             elif effective_scope == "marketing":
-                # Only clear Marketing tables - Store & Users remain 100% untouched!
+                # Only clear Marketing tables - Store, HR & Users remain 100% untouched!
                 for model in reversed(MARKETING_MODELS):
+                    try:
+                        db.execute(text(f"TRUNCATE TABLE `{model.__tablename__}`;"))
+                    except Exception:
+                        db.query(model).delete(synchronize_session=False)
+                db.commit()
+            elif effective_scope == "hr":
+                # Only clear HR tables - Store, Marketing & Users remain 100% untouched!
+                for model in reversed(HR_MODELS):
                     try:
                         db.execute(text(f"TRUNCATE TABLE `{model.__tablename__}`;"))
                     except Exception:

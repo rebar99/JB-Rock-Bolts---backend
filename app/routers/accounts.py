@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/accounts", tags=["Accounts"])
 
 
 def accounts_user(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
-    is_super = bool(user.is_super_admin or (user.email and user.email.lower() == "deepikar412003@gmail.com"))
+    is_super = bool(user.is_super_admin)
     if not is_super:
         role = application_role(user, db, "accounts")
         if role == "none":

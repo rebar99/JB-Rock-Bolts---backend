@@ -142,8 +142,11 @@ def _employee_to_dict(emp: HREmployee, detail: bool = False) -> dict:
         "is_active": emp.is_active,
         "inactive_date": emp.inactive_date.isoformat() if getattr(emp, "inactive_date", None) else None,
         "created_by": emp.created_by,
+        "updated_by": emp.updated_by,
         "created_at": emp.created_at.isoformat() if emp.created_at else None,
         "updated_at": emp.updated_at.isoformat() if emp.updated_at else None,
+        "last_opened_by": getattr(emp, "last_opened_by", None),
+        "last_opened_at": getattr(emp, "last_opened_at", None).isoformat() if getattr(emp, "last_opened_at", None) else None,
     }
 
 
@@ -440,6 +443,7 @@ def create_employee(
         log = SystemLog(
             action="Employee Added",
             entity_type="HREmployee",
+            entity_id=emp.id,
             entity_name=emp.name,
             details=f"New employee {emp.name} ({emp.employee_code}) added. Designation: {emp.designation or '—'}, Location: {emp.location or '—'}, Salary: ₹{float(emp.present_salary or 0):,.2f}.",
             changed_fields=f"Code: {emp.employee_code}, Desig: {emp.designation or '—'}, Salary: ₹{float(emp.present_salary or 0):,.2f}",
@@ -460,7 +464,31 @@ def get_employee(emp_id: int, db: Session = Depends(get_db), current_user: User 
     emp = db.get(HREmployee, emp_id)
     if not emp:
         raise HTTPException(404, "Employee not found")
-    return _employee_to_dict(emp, detail=True)
+    data = _employee_to_dict(emp, detail=True)
+    logs = (
+        db.query(SystemLog)
+        .filter(
+            SystemLog.entity_type == "HREmployee",
+            (SystemLog.entity_id == emp.id)
+            | (SystemLog.entity_name == emp.name)
+            | (SystemLog.details.like(f"%({emp.employee_code})%")),
+        )
+        .order_by(SystemLog.created_at.desc())
+        .limit(10)
+        .all()
+    )
+    data["history"] = [
+        {
+            "id": l.id,
+            "action": l.action,
+            "details": l.details,
+            "changed_fields": l.changed_fields,
+            "user": l.user,
+            "created_at": l.created_at.isoformat() if l.created_at else None,
+        }
+        for l in logs
+    ]
+    return data
 
 
 @router.put("/employees/{emp_id}")
@@ -542,6 +570,7 @@ def update_employee(
         log = SystemLog(
             action="Employee Updated",
             entity_type="HREmployee",
+            entity_id=emp.id,
             entity_name=emp.name,
             details=details_text,
             changed_fields=changed_fields_text,
@@ -581,6 +610,7 @@ def toggle_employee_status(
         log = SystemLog(
             action=f"Employee {status_label}",
             entity_type="HREmployee",
+            entity_id=emp.id,
             entity_name=emp.name,
             details=f"Employee {emp.name} ({emp.employee_code}) status changed to {status_label} by {current_user.name}." + (f" Inactive Date: {emp.inactive_date}" if not emp.is_active and emp.inactive_date else ""),
             changed_fields=f"Status: {status_label}",

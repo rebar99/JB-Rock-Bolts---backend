@@ -602,6 +602,34 @@ async def lifespan(app: FastAPI):
                         conn.execute(text(f"ALTER TABLE store_purchase_orders ADD COLUMN {col} {dtype}"))
                     except Exception as _e:
                         logger.warning(f"[Migration] store_purchase_orders.{col}: {_e}")
+
+            # ── Store Manual Meter Conversion columns ──────────────────────────
+            for col, dtype in [
+                ("manual_meter_quantity", "FLOAT NULL"),
+                ("is_meter_entry", "TINYINT(1) NOT NULL DEFAULT 0"),
+            ]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM store_purchase_material_receipt_lines LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE store_purchase_material_receipt_lines ADD COLUMN {col} {dtype}"))
+                        logger.info(f"[Migration] Added store_purchase_material_receipt_lines.{col}")
+                    except Exception as _e:
+                        logger.warning(f"[Migration] store_purchase_material_receipt_lines.{col}: {_e}")
+
+            for col, dtype in [
+                ("manual_meter_quantity", "FLOAT NULL"),
+                ("original_quantity", "FLOAT NULL"),
+                ("original_uom", "VARCHAR(50) NULL"),
+            ]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM store_purchase_stock_transactions LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE store_purchase_stock_transactions ADD COLUMN {col} {dtype}"))
+                        logger.info(f"[Migration] Added store_purchase_stock_transactions.{col}")
+                    except Exception as _e:
+                        logger.warning(f"[Migration] store_purchase_stock_transactions.{col}: {_e}")
             # Migrate store_purchase_orders.company
             try:
                 conn.execute(text("SELECT company FROM store_purchase_orders LIMIT 1"))
@@ -717,10 +745,11 @@ async def lifespan(app: FastAPI):
         marketing = db.query(Application).filter_by(code="marketing").one()
         legacy_admins = [email.strip().lower() for email in settings.ADMIN_EMAIL.split(",") if email.strip()]
         super_admins = [email.strip().lower() for email in settings.SUPER_ADMIN_EMAIL.split(",") if email.strip()]
+        has_any_super_admin = db.query(User).filter(User.is_super_admin.is_(True)).first() is not None
         for user in db.query(User).all():
             if user.email.lower() in legacy_admins and not db.query(ApplicationAccess).filter_by(user_id=user.id, application_id=marketing.id).first():
                 db.add(ApplicationAccess(user_id=user.id, application_id=marketing.id, role="admin"))
-            if user.email.lower() in super_admins:
+            if not has_any_super_admin and user.email.lower() in super_admins:
                 user.is_super_admin = True
         db.commit()
         from app.services.seed import run_seed
@@ -997,6 +1026,8 @@ async def enforce_marketing_application_access(request, call_next):
         or path.startswith("/api/users/")
         or path == "/api/users"
         or path.startswith("/api/application-access")
+        or path.startswith("/api/hr")
+        or path.startswith("/api/documents/employee")
         or is_store_request
         or request.method == "OPTIONS"
     )

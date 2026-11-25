@@ -69,7 +69,7 @@ from app.database import get_db
 
 
 
-from app.models.models import StoreVendor, StorePurchaseItem, StorePurchaseStockItem, StorePurchaseOrder, StorePurchaseOrderActivity, StorePurchaseOrderDetail, StorePurchaseOrderLine, StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine, StorePurchaseStockTransaction, StorePurchaseStockTransfer, StorePOItemMasterItem, StorePOItemMasterSize, User, POApprovalLevel, POApprovalLevelApprover, StorePurchaseOrderApproval, POPreparedByConfig, POPreparedBySignature, StorePONotification, StorePOSequenceConfig
+from app.models.models import StoreVendor, StorePurchaseItem, StorePurchaseStockItem, StorePurchaseOrder, StorePurchaseOrderActivity, StorePurchaseOrderDetail, StorePurchaseOrderLine, StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine, StorePurchaseStockTransaction, StorePurchaseStockTransfer, StorePOItemMasterItem, StorePOItemMasterSize, User, POApprovalLevel, POApprovalLevelApprover, StorePurchaseOrderApproval, POPreparedByConfig, POPreparedBySignature, StorePONotification, StorePOSequenceConfig, StoreGroupUnitConversionConfig
 
 
 
@@ -918,22 +918,9 @@ def _item_response(item: StorePurchaseItem):
 
 
 def _record_receipt(db: Session, *, name: str, quantity: float, rate: float, vendor_name=None, reference_no=None,
-
-
-
-
-
-
-
                     receipt_date=None, uom="Nos", location=None, stock_item=None, required_for=None, user_name=None,
-
-
-
-
-
-
-
-                    existing_item=None, existing_stock_item=None, receipt_line_id=None):
+                    existing_item=None, existing_stock_item=None, receipt_line_id=None,
+                    manual_meter_quantity=None, original_quantity=None, original_uom=None):
 
 
 
@@ -1380,31 +1367,28 @@ def _record_receipt(db: Session, *, name: str, quantity: float, rate: float, ven
 
 
 
-    db.add(StorePurchaseStockTransaction(item_id=item.id, transaction_type="RECEIPT", quantity=quantity, rate=rate,
+    tx_remarks = None
+    if manual_meter_quantity is not None and original_quantity is not None:
+        tx_remarks = f"Received: {original_quantity:g} {original_uom or 'Kg'} | Stock: {manual_meter_quantity:g} Meter"
 
-
-
-
-
-
-
-        amount=round(quantity * rate, 2), transaction_date=receipt_date, vendor_name=vendor_name,
-
-
-
-
-
-
-
-        reference_no=reference_no, location=location, required_for=required_for, created_by=user_name,
-
-
-
-
-
-
-
-        receipt_line_id=receipt_line_id))
+    db.add(StorePurchaseStockTransaction(
+        item_id=item.id,
+        transaction_type="RECEIPT",
+        quantity=quantity,
+        rate=rate,
+        amount=round(quantity * rate, 2),
+        transaction_date=receipt_date,
+        vendor_name=vendor_name,
+        reference_no=reference_no,
+        location=location,
+        required_for=required_for,
+        created_by=user_name,
+        receipt_line_id=receipt_line_id,
+        manual_meter_quantity=manual_meter_quantity,
+        original_quantity=original_quantity,
+        original_uom=original_uom,
+        remarks=tx_remarks,
+    ))
 
 
 
@@ -1865,46 +1849,13 @@ class OrderPayload(BaseModel):
 
 
 class MaterialReceiptLinePayload(BaseModel):
-
-
-
-
-
-
-
     item_description: str = Field(min_length=1, max_length=500)
-
-
-
-
-
-
-
     ordered_quantity: float = Field(ge=0)
-
-
-
-
-
-
-
     received_quantity: float = Field(ge=0)
-
-
-
-
-
-
-
     uom: str = Field(default="Nos", max_length=50)
-
-
-
-
-
-
-
     unit_rate: float = Field(default=0, ge=0)
+    manual_meter_quantity: Optional[float] = Field(default=None, ge=0)
+    is_meter_entry: Optional[bool] = Field(default=False)
 
 
 
@@ -3677,6 +3628,105 @@ def update_po_sequence_config(
     }
 
 
+class UnitConversionConfigPayload(BaseModel):
+    group_name: str
+    is_enabled: bool
+    conversion_unit: str = "Meter"
+
+
+@router.get("/unit-conversion-config")
+@router.get("/unit-conversion-config/")
+def get_unit_conversion_configs(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Fetch manual unit conversion config per group, plus all available group names."""
+    configs = db.query(StoreGroupUnitConversionConfig).order_by(StoreGroupUnitConversionConfig.group_name).all()
+
+    # Get all distinct group names from StorePOItemMasterItem, StorePurchaseItem, and config
+    master_groups = [r[0].strip() for r in db.query(StorePOItemMasterItem.name).filter(StorePOItemMasterItem.name != None).all() if r[0] and r[0].strip()]
+    inventory_groups = [r[0].strip() for r in db.query(StorePurchaseItem.name).filter(StorePurchaseItem.name != None).distinct().all() if r[0] and r[0].strip()]
+    config_groups = [c.group_name.strip() for c in configs if c.group_name and c.group_name.strip()]
+
+    all_groups_map = {}
+    for g in master_groups + inventory_groups + config_groups:
+        if g and g.strip():
+            norm = g.strip()
+            if norm.lower() not in all_groups_map:
+                all_groups_map[norm.lower()] = norm
+
+    available_groups = sorted(list(all_groups_map.values()), key=lambda x: x.lower())
+    enabled_groups = [c.group_name.strip().lower() for c in configs if c.is_enabled]
+
+    return {
+        "configs": [
+            {
+                "id": c.id,
+                "group_name": c.group_name,
+                "is_enabled": c.is_enabled,
+                "conversion_unit": c.conversion_unit or "Meter",
+                "updated_by": c.updated_by,
+                "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+            }
+            for c in configs
+        ],
+        "available_groups": available_groups,
+        "enabled_groups": enabled_groups,
+    }
+
+
+@router.post("/unit-conversion-config")
+@router.post("/unit-conversion-config/")
+def update_unit_conversion_config(
+    payload: UnitConversionConfigPayload,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_super_admin),
+):
+    """Super Admin configured manual unit conversion (e.g. Kg -> Meter) for a group."""
+    grp = payload.group_name.strip()
+    if not grp:
+        raise HTTPException(status_code=400, detail="Group Name is required.")
+
+    row = db.query(StoreGroupUnitConversionConfig).filter(
+        func.lower(func.trim(StoreGroupUnitConversionConfig.group_name)) == grp.lower()
+    ).first()
+
+    if not row:
+        row = StoreGroupUnitConversionConfig(
+            group_name=grp,
+            is_enabled=payload.is_enabled,
+            conversion_unit=payload.conversion_unit.strip() or "Meter",
+            updated_by=user.name,
+        )
+        db.add(row)
+    else:
+        row.is_enabled = payload.is_enabled
+        row.conversion_unit = payload.conversion_unit.strip() or "Meter"
+        row.updated_by = user.name
+
+    db.commit()
+    db.refresh(row)
+
+    status_str = "ENABLED" if payload.is_enabled else "DISABLED"
+    log_activity(
+        db,
+        "Unit Conversion Config Updated",
+        "StoreGroupUnitConversionConfig",
+        f"Manual Meter Entry {status_str} for group '{grp}' by Super Admin {user.name}",
+        user.name,
+        workspace="Store"
+    )
+
+    return {
+        "id": row.id,
+        "group_name": row.group_name,
+        "is_enabled": row.is_enabled,
+        "conversion_unit": row.conversion_unit,
+        "updated_by": row.updated_by,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
 
 
 
@@ -5352,7 +5402,10 @@ def _transaction_response(tx: StorePurchaseStockTransaction):
 
 
             "required_for": tx.required_for, "issued_to": tx.issued_to, "location": tx.location, "remarks": tx.remarks,
-            "po_number": po_number}
+            "po_number": po_number,
+            "manual_meter_quantity": getattr(tx, "manual_meter_quantity", None),
+            "original_quantity": getattr(tx, "original_quantity", None),
+            "original_uom": getattr(tx, "original_uom", None)}
 
 
 
@@ -7659,142 +7712,59 @@ def create_material_receipt(payload: MaterialReceiptPayload, user: User = Depend
 
 
     receipt_lines = [
-
-
-
-
-
-
-
         StorePurchaseMaterialReceiptLine(
-
-
-
-
-
-
-
-            receipt_id=receipt.id, line_number=index, item_description=line.item_description.strip(),
-
-
-
-
-
-
-
-            ordered_quantity=ordered_by_item[line.item_description.strip().lower()], received_quantity=line.received_quantity,
-
-
-
-
-
-
-
-            uom=line.uom.strip() or "Nos", unit_rate=line.unit_rate,
-
-
-
-
-
-
-
+            receipt_id=receipt.id,
+            line_number=index,
+            item_description=line.item_description.strip(),
+            ordered_quantity=ordered_by_item[line.item_description.strip().lower()],
+            received_quantity=line.received_quantity,
+            uom=line.uom.strip() or "Nos",
+            unit_rate=line.unit_rate,
             amount=round(line.received_quantity * line.unit_rate, 2),
-
-
-
-
-
-
-
+            manual_meter_quantity=line.manual_meter_quantity if (line.is_meter_entry and line.manual_meter_quantity and float(line.manual_meter_quantity) > 0) else None,
+            is_meter_entry=bool(line.is_meter_entry and line.manual_meter_quantity and float(line.manual_meter_quantity) > 0),
         )
-
-
-
-
-
-
-
         for index, line in enumerate(accepted_lines, start=1)
-
-
-
-
-
-
-
     ]
-
-
-
-
-
-
-
     db.add_all(receipt_lines)
-
-
-
-
-
-
-
     db.flush()
 
-
-
-
-
-
-
     for line in receipt_lines:
-
-
-
-
-
-
-
         group_name, item_name = _inventory_group_and_item(db, line.item_description)
-
-
-
-
-
-
-
-        _record_receipt(
-
-
-
-
-
-
-
-            db, name=group_name, stock_item=item_name, quantity=line.received_quantity, rate=line.unit_rate,
-
-
-
-
-
-
-
-            vendor_name=order.supplier, reference_no=order.order_number, receipt_date=payload.invoice_date,
-
-
-
-
-
-
-
-            uom=line.uom, user_name=user.name, receipt_line_id=line.id,
-
-
-
-
-
-
-
-        )
+        if line.is_meter_entry and line.manual_meter_quantity and float(line.manual_meter_quantity) > 0:
+            meter_qty = float(line.manual_meter_quantity)
+            line_amt = round(line.received_quantity * line.unit_rate, 2)
+            meter_rate = round(line_amt / meter_qty, 2) if meter_qty > 0 else line.unit_rate
+            _record_receipt(
+                db,
+                name=group_name,
+                stock_item=item_name,
+                quantity=meter_qty,
+                rate=meter_rate,
+                vendor_name=order.supplier,
+                reference_no=order.order_number,
+                receipt_date=payload.invoice_date,
+                uom="Meter",
+                user_name=user.name,
+                receipt_line_id=line.id,
+                manual_meter_quantity=meter_qty,
+                original_quantity=line.received_quantity,
+                original_uom=line.uom or "Kg",
+            )
+        else:
+            _record_receipt(
+                db,
+                name=group_name,
+                stock_item=item_name,
+                quantity=line.received_quantity,
+                rate=line.unit_rate,
+                vendor_name=order.supplier,
+                reference_no=order.order_number,
+                receipt_date=payload.invoice_date,
+                uom=line.uom,
+                user_name=user.name,
+                receipt_line_id=line.id,
+            )
 
 
 
@@ -7997,7 +7967,9 @@ def update_material_receipt(receipt_id: int, payload: MaterialReceiptPayload, us
                 received_quantity=line.received_quantity,
                 uom=line.uom.strip() or "Nos",
                 unit_rate=line.unit_rate,
-                amount=round(line.received_quantity * line.unit_rate, 2)
+                amount=round(line.received_quantity * line.unit_rate, 2),
+                manual_meter_quantity=line.manual_meter_quantity if (line.is_meter_entry and line.manual_meter_quantity and float(line.manual_meter_quantity) > 0) else None,
+                is_meter_entry=bool(line.is_meter_entry and line.manual_meter_quantity and float(line.manual_meter_quantity) > 0),
             )
             for index, line in enumerate(payload.lines, start=1)
         ]
@@ -8007,19 +7979,40 @@ def update_material_receipt(receipt_id: int, payload: MaterialReceiptPayload, us
         for line in new_lines:
             if line.received_quantity > 0:
                 group_name, item_name = _inventory_group_and_item(db, line.item_description)
-                _record_receipt(
-                    db,
-                    name=group_name,
-                    stock_item=item_name,
-                    quantity=line.received_quantity,
-                    rate=line.unit_rate,
-                    vendor_name=order.supplier,
-                    reference_no=order.order_number,
-                    receipt_date=payload.invoice_date,
-                    uom=line.uom,
-                    user_name=user.name,
-                    receipt_line_id=line.id,
-                )
+                if line.is_meter_entry and line.manual_meter_quantity and float(line.manual_meter_quantity) > 0:
+                    meter_qty = float(line.manual_meter_quantity)
+                    line_amt = round(line.received_quantity * line.unit_rate, 2)
+                    meter_rate = round(line_amt / meter_qty, 2) if meter_qty > 0 else line.unit_rate
+                    _record_receipt(
+                        db,
+                        name=group_name,
+                        stock_item=item_name,
+                        quantity=meter_qty,
+                        rate=meter_rate,
+                        vendor_name=order.supplier,
+                        reference_no=order.order_number,
+                        receipt_date=payload.invoice_date,
+                        uom="Meter",
+                        user_name=user.name,
+                        receipt_line_id=line.id,
+                        manual_meter_quantity=meter_qty,
+                        original_quantity=line.received_quantity,
+                        original_uom=line.uom or "Kg",
+                    )
+                else:
+                    _record_receipt(
+                        db,
+                        name=group_name,
+                        stock_item=item_name,
+                        quantity=line.received_quantity,
+                        rate=line.unit_rate,
+                        vendor_name=order.supplier,
+                        reference_no=order.order_number,
+                        receipt_date=payload.invoice_date,
+                        uom=line.uom,
+                        user_name=user.name,
+                        receipt_line_id=line.id,
+                    )
 
         _refresh_po_received_status(db, order)
 
@@ -10056,24 +10049,28 @@ def _order_response(order: StorePurchaseOrder, db=None):
 
 
 
-        "items": [{"id": line.id, "line_number": line.line_number, "item_description": line.item_description,
-
-
-
-                    "item_name": line.item_description,
-                    "stock_item": (_inventory_group_and_item(session, line.item_description)[1] if session and _inventory_group_and_item(session, line.item_description)[1] != "General" else line.item_description),
-
-
-
-                    "group_name": (_inventory_group_and_item(session, line.item_description)[0] if session else None),
-
-
-
-                    "quantity": line.quantity, "uom": line.uom, "unit_rate": line.unit_rate, "amount": line.amount}
-
-
-
-                   for line in order.line_items],
+        "items": [
+            {
+                "id": line.id,
+                "line_number": line.line_number,
+                "item_description": line.item_description,
+                "item_name": line.item_description,
+                "stock_item": (_inventory_group_and_item(session, line.item_description)[1] if session and _inventory_group_and_item(session, line.item_description)[1] != "General" else line.item_description),
+                "group_name": (_inventory_group_and_item(session, line.item_description)[0] if session else None),
+                "manual_meter_enabled": bool(
+                    session and ((_inventory_group_and_item(session, line.item_description)[0] or "").strip().lower() in {
+                        r[0].strip().lower()
+                        for r in (db or session).query(StoreGroupUnitConversionConfig.group_name).filter(StoreGroupUnitConversionConfig.is_enabled == True).all()
+                        if r[0]
+                    })
+                ),
+                "quantity": line.quantity,
+                "uom": line.uom,
+                "unit_rate": line.unit_rate,
+                "amount": line.amount,
+            }
+            for line in order.line_items
+        ],
 
 
 
@@ -10206,23 +10203,21 @@ def _material_receipt_response(receipt: StorePurchaseMaterialReceipt):
 
 
 
-        "lines": [{"id": line.id, "line_number": line.line_number, "item_description": line.item_description,
-
-
-
-
-
-
-
-                   "ordered_quantity": line.ordered_quantity, "received_quantity": line.received_quantity,
-
-
-
-
-
-
-
-                   "uom": line.uom, "unit_rate": line.unit_rate, "amount": line.amount} for line in receipt.lines],
+        "lines": [
+            {
+                "id": line.id,
+                "line_number": line.line_number,
+                "item_description": line.item_description,
+                "ordered_quantity": line.ordered_quantity,
+                "received_quantity": line.received_quantity,
+                "uom": line.uom,
+                "unit_rate": line.unit_rate,
+                "amount": line.amount,
+                "manual_meter_quantity": getattr(line, "manual_meter_quantity", None),
+                "is_meter_entry": bool(getattr(line, "is_meter_entry", False)),
+            }
+            for line in receipt.lines
+        ],
 
 
 

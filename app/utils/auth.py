@@ -72,19 +72,10 @@ def get_current_user(
     return user
 
 
-SUPER_ADMIN_EMAILS = {
-    "deepikar412003@gmail.com",
-    "deepikarajput412003@gmail.com",
-    "admin@jbrockbolts.com",
-}
-
 def is_super_admin_user(user: Optional[User]) -> bool:
     if not user:
         return False
-    if bool(getattr(user, "is_super_admin", False)):
-        return True
-    email = (getattr(user, "email", "") or "").lower().strip()
-    return email in SUPER_ADMIN_EMAILS or "deepikar" in email
+    return bool(getattr(user, "is_super_admin", False))
 
 def require_super_admin(
     current_user: User = Depends(get_current_user),
