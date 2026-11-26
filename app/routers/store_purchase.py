@@ -5545,6 +5545,94 @@ def item_history(item_id: int, _: User = Depends(store_user), db: Session = Depe
     return [_transaction_response(tx) for tx in db.query(StorePurchaseStockTransaction).filter_by(item_id=item_id).order_by(StorePurchaseStockTransaction.transaction_date.desc(), StorePurchaseStockTransaction.id.desc()).all()]
 
 
+@router.get("/inventory/{item_id}/po-numbers")
+def item_po_numbers(item_id: int, _: User = Depends(store_user), db: Session = Depends(get_db)):
+    """Return all PO numbers ever associated with this inventory item."""
+    item = db.get(StorePurchaseItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Material not found.")
+
+    po_map: dict = {}  # po_number -> dict
+
+    # Source 1: RECEIPT transactions with reference_no
+    txs = db.query(StorePurchaseStockTransaction).filter(
+        StorePurchaseStockTransaction.item_id == item_id,
+        StorePurchaseStockTransaction.transaction_type == "RECEIPT",
+        StorePurchaseStockTransaction.reference_no != None,
+    ).order_by(StorePurchaseStockTransaction.transaction_date.desc()).all()
+    for tx in txs:
+        num = tx.reference_no
+        if num and num not in po_map:
+            po_map[num] = {
+                "po_number": num,
+                "vendor_name": tx.vendor_name or item.vendor_name,
+                "date": str(tx.transaction_date) if tx.transaction_date else None,
+                "quantity": float(tx.quantity or 0),
+                "rate": float(tx.rate or 0),
+            }
+
+    # Source 2: RECEIPT transactions linked via receipt_line_id -> MR -> PO
+    txs_with_line = db.query(StorePurchaseStockTransaction).filter(
+        StorePurchaseStockTransaction.item_id == item_id,
+        StorePurchaseStockTransaction.transaction_type == "RECEIPT",
+        StorePurchaseStockTransaction.receipt_line_id != None,
+    ).all()
+    for tx in txs_with_line:
+        try:
+            line = db.get(StorePurchaseMaterialReceiptLine, tx.receipt_line_id)
+            if line:
+                mr = db.get(StorePurchaseMaterialReceipt, line.receipt_id)
+                if mr and mr.order_id:
+                    po = db.get(StorePurchaseOrder, mr.order_id)
+                    if po and po.order_number not in po_map:
+                        po_map[po.order_number] = {
+                            "po_number": po.order_number,
+                            "vendor_name": tx.vendor_name or item.vendor_name,
+                            "date": str(tx.transaction_date) if tx.transaction_date else None,
+                            "quantity": float(tx.quantity or 0),
+                            "rate": float(tx.rate or 0),
+                        }
+        except Exception:
+            pass
+
+    # Source 3: item.reference_no fallback
+    if item.reference_no and item.reference_no not in po_map:
+        po_map[item.reference_no] = {
+            "po_number": item.reference_no,
+            "vendor_name": item.vendor_name,
+            "date": str(item.receipt_date) if item.receipt_date else None,
+            "quantity": float(item.quantity or 0),
+            "rate": float(item.rate or 0),
+        }
+
+    # Source 4: Direct PO line search by vendor + item description match
+    if item.vendor_name:
+        vendor_clean = item.vendor_name.strip().lower()
+        item_desc_clean = (item.stock_item or item.name or "").strip().lower()
+        try:
+            matching_orders = db.query(StorePurchaseOrder).filter(
+                func.lower(StorePurchaseOrder.supplier).contains(vendor_clean[:20])
+            ).all()
+            for po in matching_orders:
+                if po.order_number in po_map:
+                    continue
+                for line in (po.line_items or []):
+                    line_desc = (line.item_description or "").strip().lower()
+                    if item_desc_clean and (item_desc_clean in line_desc or line_desc in item_desc_clean):
+                        po_map[po.order_number] = {
+                            "po_number": po.order_number,
+                            "vendor_name": po.supplier,
+                            "date": str(po.created_at.date()) if getattr(po, "created_at", None) else None,
+                            "quantity": float(line.quantity or 0),
+                            "rate": float(line.unit_rate or 0),
+                        }
+                        break
+        except Exception as e:
+            logger.warning(f"[PONumbers] PO line search failed for item {item_id}: {e}")
+
+    return list(po_map.values())
+
+
 
 
 
