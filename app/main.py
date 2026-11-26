@@ -709,6 +709,40 @@ async def lifespan(app: FastAPI):
                 except Exception as _e:
                     logger.warning(f"[Migration] po_prepared_by_signatures: {_e}")
 
+                # Safely create data_verification_permissions table
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS data_verification_permissions (
+                            id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                            user_id INT NOT NULL UNIQUE,
+                            granted_by INT NULL,
+                            granted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                            FOREIGN KEY (granted_by) REFERENCES users(id) ON DELETE SET NULL
+                        ) CHARACTER SET utf8mb4
+                    """))
+                    logger.info("[Migration] Verified data_verification_permissions table")
+                except Exception as _e:
+                    logger.warning(f"[Migration] data_verification_permissions: {_e}")
+
+                # Safely create data_verification_records table
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS data_verification_records (
+                            id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                            scope VARCHAR(60) NOT NULL DEFAULT 'marketing_report',
+                            verified_by_user_id INT NOT NULL,
+                            verified_at DATETIME NOT NULL,
+                            expires_at DATETIME NOT NULL,
+                            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                            notes TEXT NULL,
+                            FOREIGN KEY (verified_by_user_id) REFERENCES users(id) ON DELETE CASCADE
+                        ) CHARACTER SET utf8mb4
+                    """))
+                    logger.info("[Migration] Verified data_verification_records table")
+                except Exception as _e:
+                    logger.warning(f"[Migration] data_verification_records: {_e}")
+
     except Exception as e:
         logger.error(f"Error applying schema updates: {e}")
 
