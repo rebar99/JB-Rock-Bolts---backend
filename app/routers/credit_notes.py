@@ -8,6 +8,7 @@ from app.database import get_db
 from app.models.models import CreditNote, CreditNoteItem, Sale, WorkOrderSale, SaleItem, WorkOrderSaleItem, POLineItem, WOLineItem, PurchaseOrder, WorkOrder
 from app.schemas.credit_note import CreditNoteCreate, CreditNoteUpdate, CreditNoteOut, AlreadyCreditedItem
 from app.utils.helpers import generate_credit_note_number, log_activity, recalc_po_delivered_quantities, recalc_wo_completed_quantities
+from app.routers.upload_helpers import delete_uploaded_file
 from app.utils.auth import require_admin_for_write
 from app.models.models import User
 
@@ -140,6 +141,18 @@ def create_credit_note(
     if (payload.sale_id or payload.wo_sale_id) and not source_sale:
         raise HTTPException(status_code=404, detail="Selected invoice was not found")
 
+    # If sale_id/wo_sale_id was not provided, attempt to locate source invoice by invoice_number
+    if not source_sale and (payload.invoice_number or "").strip():
+        inv_str = payload.invoice_number.strip()
+        if payload.sale_type.upper() == "PO":
+            source_sale = db.query(Sale).filter(Sale.invoice_number == inv_str, Sale.is_deleted == False).first()
+            if source_sale and not payload.sale_id:
+                payload.sale_id = source_sale.id
+        elif payload.sale_type.upper() == "WO":
+            source_sale = db.query(WorkOrderSale).filter(WorkOrderSale.invoice_number == inv_str, WorkOrderSale.is_deleted == False).first()
+            if source_sale and not payload.wo_sale_id:
+                payload.wo_sale_id = source_sale.id
+
     invoice_number = source_sale.invoice_number if source_sale else payload.invoice_number
     invoice_date = getattr(source_sale, "invoice_date", None) if source_sale else payload.invoice_date
     po_number = (getattr(source_sale, "po_number", None) or getattr(source_sale, "wo_number", None)) if source_sale else payload.po_number
@@ -254,6 +267,32 @@ def create_credit_note(
             if wo:
                 recalc_wo_completed_quantities(db, wo)
                 db.commit()
+
+    # ── Automatically delete uploaded files for the credited invoice ──────
+    if source_sale:
+        inv_file = source_sale.invoice_url
+        eway_file = source_sale.e_way_bill_url
+
+        # Delete physical files from disk if present
+        if inv_file:
+            delete_uploaded_file(inv_file)
+        if eway_file:
+            delete_uploaded_file(eway_file)
+
+        # Clear file references from database for this specific invoice
+        source_sale.invoice_url = None
+        source_sale.e_way_bill_url = None
+        db.commit()
+
+        log_activity(
+            db,
+            action="Invoice Files Deleted",
+            entity_type="CreditNote",
+            entity_id=cn.id,
+            entity_name=cn_number,
+            details=f"Invoice and E-Way bill files automatically deleted for invoice {source_sale.invoice_number} after Credit Note {cn_number} generation.",
+            user=payload.created_by or current_user.name,
+        )
 
     log_activity(
         db,

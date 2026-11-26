@@ -37,6 +37,7 @@ from app.routers import application_access
 from app.routers import store_purchase
 from app.routers import accounts
 from app.routers import hr
+from app.routers import data_verification
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -973,6 +974,27 @@ async def lifespan(app: FastAPI):
     from apscheduler.schedulers.background import BackgroundScheduler
     _scheduler = BackgroundScheduler()
     _scheduler.add_job(purge_expired_deleted_records, "interval", hours=1, id="purge_deleted")
+
+    # Data Verification: mark expired records every hour so status is always current
+    def _expire_verification_records():
+        from app.models.models import DataVerificationRecord
+        from datetime import datetime, timezone
+        try:
+            with SessionLocal() as _db:
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                expired = _db.query(DataVerificationRecord).filter(
+                    DataVerificationRecord.is_active == True,
+                    DataVerificationRecord.expires_at < now,
+                ).all()
+                for rec in expired:
+                    rec.is_active = False
+                if expired:
+                    _db.commit()
+                    logger.info(f"[DataVerification] Expired {len(expired)} verification record(s).")
+        except Exception as exc:
+            logger.warning(f"[DataVerification] Expiry job error: {exc}")
+
+    _scheduler.add_job(_expire_verification_records, "interval", hours=1, id="expire_verification")
     _scheduler.start()
     logger.info("[AutoPurge] APScheduler started — purge job runs every hour.")
 
@@ -1264,6 +1286,7 @@ app.include_router(application_access.router)
 app.include_router(store_purchase.router)
 app.include_router(accounts.router)
 app.include_router(hr.router)
+app.include_router(data_verification.router)
 
 
 @app.get("/", tags=["Health"])

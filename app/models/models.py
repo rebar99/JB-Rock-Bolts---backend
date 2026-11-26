@@ -1599,3 +1599,36 @@ class HRSalaryAudit(Base):
 
     salary = relationship("HRSalary", back_populates="audit_logs")
 
+
+# ---------------------------------------------------------------------------
+# Data Verification System
+# ---------------------------------------------------------------------------
+
+class DataVerificationPermission(Base):
+    """Super Admin selects which user IDs can verify Marketing Report data."""
+    __tablename__ = "data_verification_permissions"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
+    granted_by = Column(Integer, ForeignKey("users.id"), nullable=True)  # super-admin who granted
+    granted_at = Column(DateTime, server_default=func.now())
+
+    user = relationship("User", foreign_keys=[user_id])
+    granted_by_user = relationship("User", foreign_keys=[granted_by])
+
+
+class DataVerificationRecord(Base):
+    """One row per verification action; never deleted (full audit trail)."""
+    __tablename__ = "data_verification_records"
+
+    id = Column(Integer, primary_key=True)
+    # 'marketing_report' – scope; extend later for other scopes
+    scope = Column(String(60), nullable=False, default="marketing_report")
+    verified_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    verified_at = Column(DateTime, nullable=False)          # exact timestamp of verification
+    expires_at = Column(DateTime, nullable=False)           # verified_at + 7 days
+    is_active = Column(Boolean, default=True, nullable=False)  # False once superseded
+    notes = Column(Text, nullable=True)
+
+    verified_by = relationship("User", foreign_keys=[verified_by_user_id])
+

@@ -43,6 +43,48 @@ def save_upload_bytes(content: bytes, filename: str, subfolder: str = "") -> str
     return relative_url
 
 
+def delete_uploaded_file(file_url: str) -> None:
+    """
+    Safely delete uploaded file(s) from disk given their relative or absolute URL/path.
+    Handles semicolon-separated URLs, leading slashes, and checks all likely candidate directories.
+    Does not throw exceptions if file is missing or already deleted.
+    """
+    if not file_url:
+        return
+
+    for raw_url in str(file_url).split(";"):
+        raw_url = raw_url.strip()
+        if not raw_url:
+            continue
+
+        clean_path = raw_url.split("?")[0].lstrip("/").replace("\\", "/")
+        if clean_path.startswith("api/uploads/"):
+            clean_path = clean_path[len("api/"):]
+        elif clean_path.startswith("api/"):
+            clean_path = clean_path[len("api/"):]
+
+        sub_rel = clean_path
+        if sub_rel.startswith("uploads/"):
+            sub_rel = sub_rel[len("uploads/"):]
+
+        candidate_paths = [
+            clean_path,
+            os.path.join(BASE_DIR, clean_path),
+            os.path.join(UPLOAD_DIR, sub_rel),
+            os.path.abspath(os.path.join(UPLOAD_DIR, sub_rel)),
+            os.path.join(os.getcwd(), clean_path),
+        ]
+
+        for p in candidate_paths:
+            try:
+                if os.path.isfile(p):
+                    os.remove(p)
+                    break
+            except Exception:
+                pass
+
+
+
 def _parse_xlsx(content: bytes) -> List[Dict[str, Any]]:
     import openpyxl
     wb = openpyxl.load_workbook(BytesIO(content), data_only=True)

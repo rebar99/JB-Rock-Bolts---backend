@@ -42,7 +42,8 @@ from pydantic import BaseModel, Field
 
 
 
-from sqlalchemy.orm import Session, object_session
+from sqlalchemy.orm import Session, object_session, selectinload, joinedload
+import time
 
 
 
@@ -645,6 +646,75 @@ def _status(quantity: float, out_of_stock_limit: float | None = 0.0, low_stock_l
 
 
 
+_group_item_cache: dict[str, tuple[str, str]] = {}
+_group_item_cache_time: float = 0.0
+
+_conversion_groups_cache: set[str] | None = None
+_conversion_groups_cache_time: float = 0.0
+
+_prepared_by_cache: list | None = None
+_prepared_by_cache_time: float = 0.0
+
+_approval_levels_cache: list | None = None
+_approval_levels_cache_time: float = 0.0
+
+
+def _get_enabled_conversion_groups(db: Session) -> set[str]:
+    global _conversion_groups_cache, _conversion_groups_cache_time
+    now = time.time()
+    if _conversion_groups_cache is not None and (now - _conversion_groups_cache_time) < 120:
+        return _conversion_groups_cache
+    try:
+        rows = db.query(StoreGroupUnitConversionConfig.group_name).filter(StoreGroupUnitConversionConfig.is_enabled == True).all()
+        _conversion_groups_cache = {r[0].strip().lower() for r in rows if r[0]}
+        _conversion_groups_cache_time = now
+        return _conversion_groups_cache
+    except Exception:
+        return set()
+
+
+def _get_cached_prepared_by(db: Session):
+    global _prepared_by_cache, _prepared_by_cache_time
+    now = time.time()
+    if _prepared_by_cache is not None and (now - _prepared_by_cache_time) < 120:
+        return _prepared_by_cache
+    try:
+        _prepared_by_cache = db.query(POPreparedBySignature).order_by(POPreparedBySignature.display_order, POPreparedBySignature.id).all()
+        _prepared_by_cache_time = now
+        return _prepared_by_cache
+    except Exception:
+        return []
+
+
+def _get_cached_approval_levels(db: Session):
+    global _approval_levels_cache, _approval_levels_cache_time
+    now = time.time()
+    if _approval_levels_cache is not None and (now - _approval_levels_cache_time) < 120:
+        return _approval_levels_cache
+    try:
+        _approval_levels_cache = (
+            db.query(POApprovalLevel)
+            .options(
+                selectinload(POApprovalLevel.approvers),
+                selectinload(POApprovalLevel.checked_by_user),
+                selectinload(POApprovalLevel.approved_by_user)
+            )
+            .order_by(POApprovalLevel.min_amount, POApprovalLevel.id)
+            .all()
+        )
+        _approval_levels_cache_time = now
+        return _approval_levels_cache
+    except Exception:
+        return []
+
+
+def _clear_approval_caches():
+    global _approval_levels_cache, _prepared_by_cache, _conversion_groups_cache
+    _approval_levels_cache = None
+    _prepared_by_cache = None
+    _conversion_groups_cache = None
+
+
 def _inventory_group_and_item(db: Session, description: str) -> tuple[str, str]:
     """Resolve a PO's item description or combined item-master value into inventory group + item.
 
@@ -663,6 +733,15 @@ def _inventory_group_and_item(db: Session, description: str) -> tuple[str, str]:
     if not raw:
         return "General Stores", "General"
 
+    global _group_item_cache, _group_item_cache_time
+    now = time.time()
+    if (now - _group_item_cache_time) > 300:
+        _group_item_cache.clear()
+        _group_item_cache_time = now
+
+    if raw in _group_item_cache:
+        return _group_item_cache[raw]
+
     raw_lower = raw.lower()
     raw_norm = " ".join(raw_lower.split())
 
@@ -674,13 +753,17 @@ def _inventory_group_and_item(db: Session, description: str) -> tuple[str, str]:
         .first()
     )
     if size_match and size_match.item:
-        return size_match.item.name.strip(), size_match.size.strip()
+        res = (size_match.item.name.strip(), size_match.size.strip())
+        _group_item_cache[raw] = res
+        return res
 
     # 1b. Check StorePOItemMasterSize with normalized whitespace
     all_sizes = db.query(StorePOItemMasterSize).join(StorePOItemMasterItem).all()
     for s in all_sizes:
         if s.size and " ".join(s.size.lower().split()) == raw_norm and s.item:
-            return s.item.name.strip(), s.size.strip()
+            res = (s.item.name.strip(), s.size.strip())
+            _group_item_cache[raw] = res
+            return res
 
     # 1c. Check StorePOItemMasterSize with clean/prefix match (e.g. "Micro Pipe OD 140*" -> "Micro Pipe OD 140*6.3 mm")
     clean_raw = re.sub(r'[^a-zA-Z0-9]', '', raw_lower)
@@ -689,17 +772,23 @@ def _inventory_group_and_item(db: Session, description: str) -> tuple[str, str]:
             if s.size and s.item:
                 c_s = re.sub(r'[^a-zA-Z0-9]', '', s.size).lower()
                 if c_s and (c_s.startswith(clean_raw) or clean_raw.startswith(c_s)):
-                    return s.item.name.strip(), s.size.strip()
+                    res = (s.item.name.strip(), s.size.strip())
+                    _group_item_cache[raw] = res
+                    return res
 
     # 2. Check if description starts with a Group Name prefix (e.g. "General Stores Allen Bolt...")
     candidates = sorted(db.query(StorePOItemMasterItem).all(), key=lambda item: len(item.name), reverse=True)
     for master in candidates:
         group = master.name.strip()
         if raw_lower == group.lower():
-            return group, "General"
+            res = (group, "General")
+            _group_item_cache[raw] = res
+            return res
         prefix = f"{group} ".lower()
         if raw_lower.startswith(prefix):
-            return group, raw[len(group):].strip() or "General"
+            res = (group, raw[len(group):].strip() or "General")
+            _group_item_cache[raw] = res
+            return res
 
     # 3. Regular ItemMasterSize (non-store item master) fallback
     try:
@@ -711,16 +800,24 @@ def _inventory_group_and_item(db: Session, description: str) -> tuple[str, str]:
             .first()
         )
         if im_match and im_match.item:
-            return im_match.item.name.strip(), im_match.size.strip()
+            res = (im_match.item.name.strip(), im_match.size.strip())
+            _group_item_cache[raw] = res
+            return res
     except Exception:
         pass
 
     # 4. Trailing unit size match (e.g. "Round Black 42mm")
     size_match_re = re.match(r"^(.*?)(\d+(?:\.\d+)?\s*(?:mm|cm|m|inch|in|kg|g|mt|nos))$", raw, re.IGNORECASE)
     if size_match_re:
-        return size_match_re.group(1).strip(" ,-"), size_match_re.group(2).strip()
+        res = (size_match_re.group(1).strip(" ,-"), size_match_re.group(2).strip())
+        _group_item_cache[raw] = res
+        return res
 
-    return raw, "General"
+    res = (raw, "General")
+    _group_item_cache[raw] = res
+    if len(_group_item_cache) > 5000:
+        _group_item_cache.clear()
+    return res
 
 
 
@@ -830,16 +927,50 @@ def _item_response(item: StorePurchaseItem):
 
     rate = float(item.rate or 0.0)
     receipt_txs = [tx for tx in getattr(item, "transactions", []) if tx.transaction_type == "RECEIPT"]
-    if receipt_txs:
-        distinct_rates = list(dict.fromkeys(round(float(tx.rate or 0), 2) for tx in receipt_txs if (tx.rate or 0) > 0))
-        if len(distinct_rates) > 1:
-            rate = sum(distinct_rates)
-        elif len(distinct_rates) == 1:
-            rate = distinct_rates[0]
-        tot_amt = sum(float(tx.amount if tx.amount is not None else ((tx.quantity or 0) * (tx.rate or 0))) for tx in receipt_txs)
-        remaining_stock_amount = round(tot_amt, 2)
-    else:
-        remaining_stock_amount = round(available_quantity * rate, 2)
+    if rate <= 0 and receipt_txs:
+        sorted_txs = sorted(receipt_txs, key=lambda x: (x.transaction_date or date.min, x.id or 0), reverse=True)
+        for tx in sorted_txs:
+            if (tx.rate or 0) > 0:
+                rate = round(float(tx.rate), 2)
+                break
+    remaining_stock_amount = round(available_quantity * rate, 2)
+
+    po_references = []
+    seen_pos = set()
+    for tx in sorted(receipt_txs, key=lambda x: (x.transaction_date or date.min, x.id or 0), reverse=True):
+        po_num = tx.reference_no
+        if not po_num and tx.receipt_line_id:
+            try:
+                from sqlalchemy.orm import object_session
+                s = object_session(tx)
+                if s:
+                    line = s.get(StorePurchaseMaterialReceiptLine, tx.receipt_line_id)
+                    if line:
+                        mr = s.get(StorePurchaseMaterialReceipt, line.receipt_id)
+                        if mr:
+                            po = s.get(StorePurchaseOrder, mr.order_id)
+                            if po:
+                                po_num = po.order_number
+            except Exception:
+                pass
+        if po_num and po_num not in seen_pos:
+            seen_pos.add(po_num)
+            po_references.append({
+                "po_number": po_num,
+                "vendor_name": tx.vendor_name or item.vendor_name,
+                "date": str(tx.transaction_date) if tx.transaction_date else None,
+                "quantity": float(tx.quantity or 0),
+                "rate": float(tx.rate or 0),
+            })
+
+    if item.reference_no and item.reference_no not in seen_pos:
+        po_references.append({
+            "po_number": item.reference_no,
+            "vendor_name": item.vendor_name,
+            "date": str(item.receipt_date) if item.receipt_date else None,
+            "quantity": float(item.quantity or 0),
+            "rate": float(item.rate or 0),
+        })
 
     return {
         "id": item.id, "name": item.name, "quantity": available_quantity,
@@ -848,6 +979,7 @@ def _item_response(item: StorePurchaseItem):
         "previous_quantity": previous_quantity, "current_month_quantity": current_month_quantity,
         "issued_quantity": issued_quantity,
         "remaining_quantity": available_quantity, "remaining_stock_amount": remaining_stock_amount,
+        "po_references": po_references,
 
 
 
@@ -2173,23 +2305,11 @@ def _active_levels_for_amount(db: Session, amount: float):
 
 
 
-    rows = db.query(POApprovalLevel).filter(POApprovalLevel.is_enabled == True,
-
-
-
-
-
-
-
-        POApprovalLevel.min_amount <= amount,
-
-
-
-
-
-
-
-        (POApprovalLevel.max_amount.is_(None)) | (POApprovalLevel.max_amount >= amount)).order_by(POApprovalLevel.min_amount, POApprovalLevel.id).all()
+    all_levels = _get_cached_approval_levels(db) if db else []
+    rows = [
+        lv for lv in all_levels
+        if lv.is_enabled and lv.min_amount <= amount and (lv.max_amount is None or lv.max_amount >= amount)
+    ]
 
 
 
@@ -2849,33 +2969,14 @@ def _creator_user_ids(order: StorePurchaseOrder, db: Session) -> list[int]:
 
 
 def _is_final_user_misassigned_to_first_stage(approval: StorePurchaseOrderApproval, db: Session) -> bool:
-
-
-
     if approval.workflow_role == "approved_by":
-
-
-
         return False
-
-
-
     final_user_ids = {approval.next_approver_id} if approval.next_approver_id else set()
-
-
-
-    level = db.get(POApprovalLevel, approval.level_id)
-
-
-
-    if level:
-
-
-
-        final_user_ids.update(lv.approved_by_user_id for lv in _approval_levels_for_level(db, level) if lv.approved_by_user_id)
-
-
-
+    if approval.level_id and db:
+        all_levels = _get_cached_approval_levels(db)
+        level = next((lv for lv in all_levels if lv.id == approval.level_id), None)
+        if level:
+            final_user_ids.update(lv.approved_by_user_id for lv in all_levels if lv.min_amount == level.min_amount and lv.max_amount == level.max_amount and lv.approved_by_user_id)
     return approval.approver_id in final_user_ids
 
 
@@ -3296,7 +3397,7 @@ def create_approval_level(payload: ApprovalLevelPayload, _: User = Depends(requi
 
 
 
-    db.commit(); db.refresh(level); return _level_response(level)
+    db.commit(); db.refresh(level); _clear_approval_caches(); return _level_response(level)
 
 
 
@@ -3392,7 +3493,7 @@ def update_approval_level(level_id: int, payload: ApprovalLevelPayload, _: User 
 
 
 
-    db.commit(); db.refresh(level); return _level_response(level)
+    db.commit(); db.refresh(level); _clear_approval_caches(); return _level_response(level)
 
 
 
@@ -3440,7 +3541,7 @@ def delete_approval_level(level_id: int, _: User = Depends(require_super_admin),
 
 
 
-    db.delete(level); db.commit(); return {"message": "Approval level deleted."}
+    db.delete(level); db.commit(); _clear_approval_caches(); return {"message": "Approval level deleted."}
 
 
 
@@ -3528,7 +3629,7 @@ def remove_level_approver(level_id: int, user_id: int, _: User = Depends(require
 
 
 
-    db.delete(link); db.commit()
+    db.delete(link); db.commit(); _clear_approval_caches()
 
 
 
@@ -3772,31 +3873,22 @@ def pending_approvals(user: User = Depends(store_user), db: Session = Depends(ge
 
 
 
-    orders = db.query(StorePurchaseOrder).filter(
-
-
-
-
-
-
-
-        StorePurchaseOrder.is_deleted == False,
-
-
-
-
-
-
-
-        StorePurchaseOrder.status.in_(["Pending Approval", "Partially Approved"])
-
-
-
-
-
-
-
-    ).all()
+    orders = (
+        db.query(StorePurchaseOrder)
+        .options(
+            selectinload(StorePurchaseOrder.details),
+            selectinload(StorePurchaseOrder.line_items),
+            selectinload(StorePurchaseOrder.approvals).selectinload(StorePurchaseOrderApproval.approver),
+            selectinload(StorePurchaseOrder.activities),
+            selectinload(StorePurchaseOrder.material_receipts).selectinload(StorePurchaseMaterialReceipt.lines),
+        )
+        .filter(
+            StorePurchaseOrder.is_deleted == False,
+            StorePurchaseOrder.status.in_(["Pending Approval", "Partially Approved"])
+        )
+        .order_by(StorePurchaseOrder.created_at.desc())
+        .all()
+    )
 
 
 
@@ -4555,12 +4647,13 @@ def inventory(_: User = Depends(store_user), db: Session = Depends(get_db)):
                     needs_commit = True
             else:
                 rec_txs = [tx for tx in getattr(it, "transactions", []) if tx.transaction_type == "RECEIPT"]
-                if rec_txs:
-                    distinct_rates = list(dict.fromkeys(round(float(tx.rate or 0), 2) for tx in rec_txs if (tx.rate or 0) > 0))
-                    calc_r = sum(distinct_rates) if distinct_rates else it.rate
-                    if it.rate != calc_r:
-                        it.rate = calc_r
-                        needs_commit = True
+                if (it.rate or 0) <= 0 and rec_txs:
+                    sorted_txs = sorted(rec_txs, key=lambda x: (x.transaction_date or date.min, x.id or 0), reverse=True)
+                    for tx in sorted_txs:
+                        if (tx.rate or 0) > 0:
+                            it.rate = round(float(tx.rate), 2)
+                            needs_commit = True
+                            break
                 for si in getattr(it, "stock_items", []):
                     if len(it.stock_items) <= 1 and si.rate != it.rate:
                         si.rate = it.rate
@@ -4835,6 +4928,10 @@ def update_item(item_id: int, payload: ItemPayload, _: User = Depends(store_admi
 
 
     for key, value in payload.model_dump(exclude={"quantity", "previous_quantity", "current_month_quantity"}).items(): setattr(item, key, value)
+    item.rate = float(payload.rate or 0.0)
+    for si in getattr(item, "stock_items", []):
+        if len(item.stock_items) <= 1:
+            si.rate = item.rate
 
 
 
@@ -6710,14 +6807,19 @@ def orders(_: User = Depends(store_user), db: Session = Depends(get_db)):
 
 
 
-    records = db.query(StorePurchaseOrder).filter(StorePurchaseOrder.is_deleted == False).order_by(StorePurchaseOrder.created_at.desc()).all()
-
-
-
-
-
-
-
+    records = (
+        db.query(StorePurchaseOrder)
+        .options(
+            selectinload(StorePurchaseOrder.details),
+            selectinload(StorePurchaseOrder.line_items),
+            selectinload(StorePurchaseOrder.approvals).selectinload(StorePurchaseOrderApproval.approver),
+            selectinload(StorePurchaseOrder.activities),
+            selectinload(StorePurchaseOrder.material_receipts).selectinload(StorePurchaseMaterialReceipt.lines),
+        )
+        .filter(StorePurchaseOrder.is_deleted == False)
+        .order_by(StorePurchaseOrder.created_at.desc())
+        .all()
+    )
     return [_order_response(record, db=db) for record in records]
 
 
@@ -9460,7 +9562,7 @@ def _build_signature_config_inner(order: StorePurchaseOrder, db):
 
 
 
-    pb_entries = db.query(POPreparedBySignature).order_by(POPreparedBySignature.display_order, POPreparedBySignature.id).all() if db else []
+    pb_entries = _get_cached_prepared_by(db) if db else []
 
 
 
@@ -10055,21 +10157,16 @@ def _order_response(order: StorePurchaseOrder, db=None):
                 "line_number": line.line_number,
                 "item_description": line.item_description,
                 "item_name": line.item_description,
-                "stock_item": (_inventory_group_and_item(session, line.item_description)[1] if session and _inventory_group_and_item(session, line.item_description)[1] != "General" else line.item_description),
-                "group_name": (_inventory_group_and_item(session, line.item_description)[0] if session else None),
-                "manual_meter_enabled": bool(
-                    session and ((_inventory_group_and_item(session, line.item_description)[0] or "").strip().lower() in {
-                        r[0].strip().lower()
-                        for r in (db or session).query(StoreGroupUnitConversionConfig.group_name).filter(StoreGroupUnitConversionConfig.is_enabled == True).all()
-                        if r[0]
-                    })
-                ),
+                "stock_item": stk if stk != "General" else line.item_description,
+                "group_name": grp,
+                "manual_meter_enabled": bool(grp and grp.strip().lower() in _get_enabled_conversion_groups(db or session)),
                 "quantity": line.quantity,
                 "uom": line.uom,
                 "unit_rate": line.unit_rate,
                 "amount": line.amount,
             }
             for line in order.line_items
+            for grp, stk in [(_inventory_group_and_item(session, line.item_description) if session else (None, line.item_description))]
         ],
 
 
@@ -10809,74 +10906,24 @@ def add_prepared_by(payload: PreparedByPayload, user: User = Depends(require_sup
 
 
 
-        db.commit(); db.refresh(existing)
-
-
-
+        db.commit(); db.refresh(existing); _clear_approval_caches()
         return _prepared_by_list_response([existing])[0]
 
-
-
     entry = POPreparedBySignature(
-
-
-
         user_id=target.id, user_name=target.name,
-
-
-
         display_order=payload.display_order, added_by=user.name
-
-
-
     )
-
-
-
-    db.add(entry); db.commit(); db.refresh(entry)
-
-
-
+    db.add(entry); db.commit(); db.refresh(entry); _clear_approval_caches()
     return _prepared_by_list_response([entry])[0]
 
 
-
-
-
-
-
-
-
-
-
 @router.delete("/po-signature-config/prepared-by/{entry_id}")
-
-
-
 def remove_prepared_by(entry_id: int, user: User = Depends(require_super_admin), db: Session = Depends(get_db)):
-
-
-
     """Remove a Prepared By person by entry id."""
-
-
-
     entry = db.get(POPreparedBySignature, entry_id)
-
-
-
     if not entry:
-
-
-
         raise HTTPException(status_code=404, detail="Entry not found.")
-
-
-
-    db.delete(entry); db.commit()
-
-
-
+    db.delete(entry); db.commit(); _clear_approval_caches()
     return {"message": "Removed."}
 
 
@@ -10990,13 +11037,7 @@ def update_level_checked_by(level_id: int, payload: SlabUserPayload, user: User 
 
 
     level.checked_by_user_id = target.id
-
-
-
-    db.commit(); db.refresh(level)
-
-
-
+    db.commit(); db.refresh(level); _clear_approval_caches()
     return _level_sig_response(level)
 
 
@@ -11046,13 +11087,7 @@ def update_level_approved_by(level_id: int, payload: SlabUserPayload, user: User
 
 
     level.approved_by_user_id = target.id
-
-
-
-    db.commit(); db.refresh(level)
-
-
-
+    db.commit(); db.refresh(level); _clear_approval_caches()
     return _level_sig_response(level)
 
 

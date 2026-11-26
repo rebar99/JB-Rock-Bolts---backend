@@ -358,7 +358,24 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db), current_user
             detail="Invoice Date cannot be before 1 April 2026."
         )
 
-    invoice_number = payload.invoice_number or generate_invoice_number(db)
+    # E-Way Bill Mandatory Validation: required for invoice amount ₹50,000 or above
+    if (payload.grand_total or 0) >= 50000:
+        has_eway = bool(
+            (payload.e_way_bill_no and payload.e_way_bill_no.strip()) or
+            (payload.e_way_bill_url and payload.e_way_bill_url.strip())
+        )
+        if not has_eway:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="E-Way Bill details/document is mandatory for sales invoices of ₹50,000 or above."
+            )
+
+    if not payload.invoice_number or not str(payload.invoice_number).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invoice Number is mandatory."
+        )
+    invoice_number = str(payload.invoice_number).strip()
 
     sale = Sale(
         po_id=payload.po_id,
@@ -522,6 +539,32 @@ def update_sale(sale_id: int, payload: SaleUpdate, db: Session = Depends(get_db)
 
     if "invoice_date" in updates:
         new_date = updates["invoice_date"]
+
+    if "invoice_number" in updates:
+        if not updates["invoice_number"] or not str(updates["invoice_number"]).strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invoice Number is mandatory."
+            )
+
+    # E-Way Bill Mandatory Validation: required for invoice amount ₹50,000 or above
+    effective_total = updates.get("grand_total")
+    if effective_total is None:
+        effective_total = sale.grand_total or 0
+
+    is_data_edit = "items" in updates or "grand_total" in updates or "e_way_bill_no" in updates or "e_way_bill_url" in updates
+    if is_data_edit and effective_total >= 50000:
+        eff_eway_no = updates.get("e_way_bill_no", sale.e_way_bill_no)
+        eff_eway_url = updates.get("e_way_bill_url", sale.e_way_bill_url)
+        has_eway = bool(
+            (eff_eway_no and str(eff_eway_no).strip()) or
+            (eff_eway_url and str(eff_eway_url).strip())
+        )
+        if not has_eway:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="E-Way Bill details/document is mandatory for sales invoices of ₹50,000 or above."
+            )
 
     if "items" in updates:
         new_items_data = updates.pop("items")

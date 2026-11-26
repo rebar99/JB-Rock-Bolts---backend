@@ -349,7 +349,12 @@ def create_work_order_sale(payload: WorkOrderSaleCreate, db: Session = Depends(g
             detail="Invoice Date cannot be before 1 April 2026."
         )
 
-    invoice_number = payload.invoice_number or generate_wo_invoice_number(db)
+    if not payload.invoice_number or not str(payload.invoice_number).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invoice Number is mandatory."
+        )
+    invoice_number = str(payload.invoice_number).strip()
 
     sale = WorkOrderSale(
         wo_id=payload.wo_id,
@@ -470,6 +475,13 @@ def update_work_order_sale(sale_id: int, payload: WorkOrderSaleUpdate, db: Sessi
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Delivery Challan already uploaded for this sale. Only one challan is allowed per sale.",
+            )
+
+    if "invoice_number" in updates:
+        if not updates["invoice_number"] or not str(updates["invoice_number"]).strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invoice Number is mandatory."
             )
 
     if "items" in updates:
