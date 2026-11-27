@@ -111,7 +111,9 @@ def export_sales(db: Session = Depends(get_db)):
         # Same shared helpers as the Sales Report/Dashboard — never the stored
         # Sale.subtotal/gst_amount/grand_total or SaleItem.subtotal/gst_amount
         # columns, which are only a snapshot from when the sale was created.
-        s_taxable, s_gst = compute_sale_taxable_and_gst(s.items)
+        s_taxable, s_item_gst = compute_sale_taxable_and_gst(s.items)
+        s_freight_gst = float(getattr(s, 'freight_gst_amount', 0.0) or 0.0)
+        s_gst = round(s_item_gst + s_freight_gst, 2)
         s_grand_total = compute_sale_grand_total(s_taxable, s_gst, float(s.freight or 0))
         items = s.items if s.items else [None]
         for si in items:

@@ -280,7 +280,9 @@ def get_marketing_accounts(user: User = Depends(accounts_user), db: Session = De
                 "total_amount": float(it.total_amount or 0),
             })
 
-        taxable_amount, gst_amount = compute_sale_taxable_and_gst(s.items or [])
+        taxable_amount, item_gst = compute_sale_taxable_and_gst(s.items or [])
+        freight_gst = float(getattr(s, 'freight_gst_amount', 0.0) or 0.0)
+        gst_amount = round(item_gst + freight_gst, 2)
         freight = float(s.freight or 0)
         grand_total = compute_sale_grand_total(taxable_amount, gst_amount, freight)
 

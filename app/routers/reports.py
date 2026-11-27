@@ -664,13 +664,15 @@ def get_report(
 
         # Fresh, independent GST calculation for this Sales record only:
         # Taxable Amount and GST Amount are derived straight from this sale's
-        # own line items (quantity x unit_price, and x gst_rate/100) — never
-        # from the stored Sale.subtotal/gst_amount aggregate columns. Grand
-        # Total is then derived from these same two numbers (+ freight), the
+        # own line items (quantity x unit_price, and x gst_rate/100) + any freight GST —
+        # never from the stored Sale.subtotal/gst_amount aggregate columns. Grand
+        # Total is then derived from these same numbers (+ freight), the
         # same formula used everywhere else Grand Total is shown, so the
         # Sales Report can never disagree with the Sales page over GST.
-        taxable_amount, gst_amount = compute_sale_taxable_and_gst(s.items)
-        gross_price = compute_sale_grand_total(taxable_amount, gst_amount, float(s.freight or 0))
+        taxable_amount, item_gst = compute_sale_taxable_and_gst(s.items)
+        freight_gst = float(getattr(s, 'freight_gst_amount', 0.0) or 0.0)
+        total_gst = round(item_gst + freight_gst, 2)
+        gross_price = compute_sale_grand_total(taxable_amount, total_gst, float(s.freight or 0))
 
         # Net price = invoice amount minus any active credit notes against it
         cn_amount = cn_by_sale.get(s.id, 0.0)
@@ -688,7 +690,8 @@ def get_report(
             e_way_bill_no=s.e_way_bill_no,
             price=row_price,
             subtotal=taxable_amount,
-            gst_amount=gst_amount,
+            gst_amount=total_gst,
+            freight=float(s.freight or 0),
             credit_note_amount=cn_amount,
             payment_status=s.payment_status.value if hasattr(s.payment_status, 'value') else str(s.payment_status),
             delivery_status="Dispatched",
@@ -830,7 +833,9 @@ def get_pending_pos_report(db: Session = Depends(get_db)):
                 if d.invoice_number:
                     invoice_numbers.add(d.invoice_number.strip())
                     
-            s_taxable, s_gst = compute_sale_taxable_and_gst(s.items)
+            s_taxable, s_item_gst = compute_sale_taxable_and_gst(s.items)
+            s_freight_gst = float(getattr(s, 'freight_gst_amount', 0.0) or 0.0)
+            s_gst = round(s_item_gst + s_freight_gst, 2)
             delivered_sub += s_taxable
             delivered_gst_amt += s_gst
             delivered_payment += compute_sale_grand_total(s_taxable, s_gst, float(s.freight or 0))
@@ -943,7 +948,9 @@ def get_po_fulfillment_summary(po_id: int, db: Session = Depends(get_db)):
     for s in po.sales:
         if getattr(s, 'is_deleted', False):
             continue
-        s_taxable, s_gst = compute_sale_taxable_and_gst(s.items)
+        s_taxable, s_item_gst = compute_sale_taxable_and_gst(s.items)
+        s_freight_gst = float(getattr(s, 'freight_gst_amount', 0.0) or 0.0)
+        s_gst = round(s_item_gst + s_freight_gst, 2)
         invoice_amount = compute_sale_grand_total(s_taxable, s_gst, float(s.freight or 0))
 
         payment_status = s.payment_status.value if hasattr(s.payment_status, "value") else str(s.payment_status)

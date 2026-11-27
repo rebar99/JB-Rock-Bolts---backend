@@ -174,7 +174,9 @@ def get_stats(gst: int = 1, db: Session = Depends(get_db)):
     # or the Sales page, and is recalculated from scratch on every request.
     po_revenue = 0.0
     for s in all_sales:
-        taxable_amount, gst_amount = compute_sale_taxable_and_gst(s.items)
+        taxable_amount, item_gst = compute_sale_taxable_and_gst(s.items)
+        freight_gst = float(getattr(s, 'freight_gst_amount', 0.0) or 0.0)
+        gst_amount = round(item_gst + freight_gst, 2)
         if gst == 1:
             po_revenue += compute_sale_grand_total(taxable_amount, gst_amount, float(s.freight or 0))
         else:
@@ -446,7 +448,8 @@ def get_recent_sales(limit: int = 6, gst: int = 1, db: Session = Depends(get_db)
     for r in rows:
         # Calculate price from items + freight
         if gst == 1:
-            items_sum = sum((float(it.subtotal or 0) + float(it.gst_amount or 0)) for it in r.items)
+            freight_gst = float(getattr(r, 'freight_gst_amount', 0.0) or 0.0)
+            items_sum = sum((float(it.subtotal or 0) + float(it.gst_amount or 0)) for it in r.items) + freight_gst
         else:
             items_sum = sum(float(it.subtotal or 0) for it in r.items)
             
