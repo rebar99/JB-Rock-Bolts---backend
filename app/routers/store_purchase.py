@@ -52,7 +52,7 @@ import time
 
 
 import logging
-from sqlalchemy import func, text
+from sqlalchemy import func, text, or_
 
 logger = logging.getLogger(__name__)
 
@@ -935,42 +935,100 @@ def _item_response(item: StorePurchaseItem):
                 break
     remaining_stock_amount = round(available_quantity * rate, 2)
 
-    po_references = []
-    seen_pos = set()
+    po_references_map = {}
+    mr_pos = set()
+
+    # Pass 1: MR-linked transactions (Source of truth for delivered quantities)
     for tx in sorted(receipt_txs, key=lambda x: (x.transaction_date or date.min, x.id or 0), reverse=True):
+        if not tx.receipt_line_id:
+            continue
         po_num = tx.reference_no
-        if not po_num and tx.receipt_line_id:
-            try:
-                from sqlalchemy.orm import object_session
-                s = object_session(tx)
-                if s:
-                    line = s.get(StorePurchaseMaterialReceiptLine, tx.receipt_line_id)
-                    if line:
+        tx_uom = tx.original_uom
+        try:
+            from sqlalchemy.orm import object_session
+            s = object_session(tx)
+            if s:
+                line = s.get(StorePurchaseMaterialReceiptLine, tx.receipt_line_id)
+                if line:
+                    if line.uom:
+                        tx_uom = line.uom
+                    if not po_num:
                         mr = s.get(StorePurchaseMaterialReceipt, line.receipt_id)
-                        if mr:
+                        if mr and mr.order_id:
                             po = s.get(StorePurchaseOrder, mr.order_id)
                             if po:
                                 po_num = po.order_number
-            except Exception:
-                pass
-        if po_num and po_num not in seen_pos:
-            seen_pos.add(po_num)
-            po_references.append({
-                "po_number": po_num,
-                "vendor_name": tx.vendor_name or item.vendor_name,
-                "date": str(tx.transaction_date) if tx.transaction_date else None,
-                "quantity": float(tx.quantity or 0),
-                "rate": float(tx.rate or 0),
-            })
+        except Exception:
+            pass
 
-    if item.reference_no and item.reference_no not in seen_pos:
-        po_references.append({
+        if not tx_uom:
+            tx_uom = item.uom
+
+        if po_num:
+            mr_pos.add(po_num)
+            qty = float(tx.quantity or 0)
+            date_str = str(tx.transaction_date) if tx.transaction_date else None
+            rate_val = float(tx.rate or 0)
+            vendor = tx.vendor_name or item.vendor_name
+
+            if po_num not in po_references_map:
+                po_references_map[po_num] = {
+                    "po_number": po_num,
+                    "vendor_name": vendor,
+                    "date": date_str,
+                    "quantity": round(qty, 3),
+                    "rate": rate_val,
+                    "uom": tx_uom,
+                }
+            else:
+                po_references_map[po_num]["quantity"] = round(po_references_map[po_num]["quantity"] + qty, 3)
+                if date_str and (not po_references_map[po_num]["date"] or date_str > po_references_map[po_num]["date"]):
+                    po_references_map[po_num]["date"] = date_str
+                if rate_val and not po_references_map[po_num]["rate"]:
+                    po_references_map[po_num]["rate"] = rate_val
+                if not po_references_map[po_num].get("uom") and tx_uom:
+                    po_references_map[po_num]["uom"] = tx_uom
+
+    # Pass 2: Manual transactions without receipt_line_id (only if PO has no MR transactions)
+    for tx in sorted(receipt_txs, key=lambda x: (x.transaction_date or date.min, x.id or 0), reverse=True):
+        if tx.receipt_line_id:
+            continue
+        po_num = tx.reference_no
+        if not po_num or po_num in mr_pos:
+            continue
+        qty = float(tx.quantity or 0)
+        date_str = str(tx.transaction_date) if tx.transaction_date else None
+        rate_val = float(tx.rate or 0)
+        vendor = tx.vendor_name or item.vendor_name
+        tx_uom = tx.original_uom or item.uom
+
+        if po_num not in po_references_map:
+            po_references_map[po_num] = {
+                "po_number": po_num,
+                "vendor_name": vendor,
+                "date": date_str,
+                "quantity": round(qty, 3),
+                "rate": rate_val,
+                "uom": tx_uom,
+            }
+        else:
+            po_references_map[po_num]["quantity"] = round(po_references_map[po_num]["quantity"] + qty, 3)
+            if date_str and (not po_references_map[po_num]["date"] or date_str > po_references_map[po_num]["date"]):
+                po_references_map[po_num]["date"] = date_str
+            if rate_val and not po_references_map[po_num]["rate"]:
+                po_references_map[po_num]["rate"] = rate_val
+
+    if item.reference_no and item.reference_no not in po_references_map:
+        po_references_map[item.reference_no] = {
             "po_number": item.reference_no,
             "vendor_name": item.vendor_name,
             "date": str(item.receipt_date) if item.receipt_date else None,
-            "quantity": float(item.quantity or 0),
+            "quantity": round(float(item.quantity or 0), 3),
             "rate": float(item.rate or 0),
-        })
+            "uom": item.uom,
+        }
+
+    po_references = list(po_references_map.values())
 
     return {
         "id": item.id, "name": item.name, "quantity": available_quantity,
@@ -5547,53 +5605,102 @@ def item_history(item_id: int, _: User = Depends(store_user), db: Session = Depe
 
 @router.get("/inventory/{item_id}/po-numbers")
 def item_po_numbers(item_id: int, _: User = Depends(store_user), db: Session = Depends(get_db)):
-    """Return all PO numbers ever associated with this inventory item."""
+    """Return all PO numbers ever associated with this inventory item, aggregating all deliveries and returning correct UOM."""
     item = db.get(StorePurchaseItem, item_id)
     if not item:
         raise HTTPException(status_code=404, detail="Material not found.")
 
     po_map: dict = {}  # po_number -> dict
 
-    # Source 1: RECEIPT transactions with reference_no
-    txs = db.query(StorePurchaseStockTransaction).filter(
-        StorePurchaseStockTransaction.item_id == item_id,
-        StorePurchaseStockTransaction.transaction_type == "RECEIPT",
-        StorePurchaseStockTransaction.reference_no != None,
-    ).order_by(StorePurchaseStockTransaction.transaction_date.desc()).all()
-    for tx in txs:
-        num = tx.reference_no
-        if num and num not in po_map:
+    # Source 1: RECEIPT transactions linked via receipt_line_id to Material Receipts
+    txs_with_line = (
+        db.query(
+            StorePurchaseStockTransaction,
+            StorePurchaseMaterialReceiptLine,
+            StorePurchaseMaterialReceipt,
+            StorePurchaseOrder,
+        )
+        .join(StorePurchaseMaterialReceiptLine, StorePurchaseStockTransaction.receipt_line_id == StorePurchaseMaterialReceiptLine.id)
+        .join(StorePurchaseMaterialReceipt, StorePurchaseMaterialReceiptLine.receipt_id == StorePurchaseMaterialReceipt.id)
+        .outerjoin(StorePurchaseOrder, StorePurchaseMaterialReceipt.order_id == StorePurchaseOrder.id)
+        .filter(
+            StorePurchaseStockTransaction.item_id == item_id,
+            StorePurchaseStockTransaction.transaction_type == "RECEIPT",
+            or_(StorePurchaseMaterialReceipt.is_deleted == None, StorePurchaseMaterialReceipt.is_deleted == 0),
+        )
+        .order_by(StorePurchaseMaterialReceipt.invoice_date.desc(), StorePurchaseStockTransaction.id.desc())
+        .all()
+    )
+
+    mr_po_numbers = set()
+    for tx, line, mr, po in txs_with_line:
+        num = (po.order_number if po else None) or tx.reference_no
+        if not num:
+            continue
+        mr_po_numbers.add(num)
+        qty = float(line.received_quantity if line.received_quantity is not None else (tx.quantity or 0))
+        date_str = str(mr.invoice_date or tx.transaction_date or "")
+        rate = float(line.unit_rate if line.unit_rate is not None else (tx.rate or 0))
+        vendor = (po.supplier if po else None) or mr.vendor_name or tx.vendor_name or item.vendor_name
+        uom = line.uom or tx.original_uom or item.uom
+
+        if num not in po_map:
             po_map[num] = {
                 "po_number": num,
-                "vendor_name": tx.vendor_name or item.vendor_name,
-                "date": str(tx.transaction_date) if tx.transaction_date else None,
-                "quantity": float(tx.quantity or 0),
-                "rate": float(tx.rate or 0),
+                "vendor_name": vendor,
+                "date": date_str or None,
+                "quantity": round(qty, 3),
+                "rate": rate,
+                "uom": uom,
             }
+        else:
+            po_map[num]["quantity"] = round(po_map[num]["quantity"] + qty, 3)
+            if date_str and (not po_map[num]["date"] or date_str > po_map[num]["date"]):
+                po_map[num]["date"] = date_str
+            if rate and not po_map[num]["rate"]:
+                po_map[num]["rate"] = rate
+            if not po_map[num].get("uom") and uom:
+                po_map[num]["uom"] = uom
 
-    # Source 2: RECEIPT transactions linked via receipt_line_id -> MR -> PO
-    txs_with_line = db.query(StorePurchaseStockTransaction).filter(
-        StorePurchaseStockTransaction.item_id == item_id,
-        StorePurchaseStockTransaction.transaction_type == "RECEIPT",
-        StorePurchaseStockTransaction.receipt_line_id != None,
-    ).all()
-    for tx in txs_with_line:
-        try:
-            line = db.get(StorePurchaseMaterialReceiptLine, tx.receipt_line_id)
-            if line:
-                mr = db.get(StorePurchaseMaterialReceipt, line.receipt_id)
-                if mr and mr.order_id:
-                    po = db.get(StorePurchaseOrder, mr.order_id)
-                    if po and po.order_number not in po_map:
-                        po_map[po.order_number] = {
-                            "po_number": po.order_number,
-                            "vendor_name": tx.vendor_name or item.vendor_name,
-                            "date": str(tx.transaction_date) if tx.transaction_date else None,
-                            "quantity": float(tx.quantity or 0),
-                            "rate": float(tx.rate or 0),
-                        }
-        except Exception:
-            pass
+    # Source 2: Manual / legacy RECEIPT transactions without receipt_line_id
+    manual_txs = (
+        db.query(StorePurchaseStockTransaction)
+        .filter(
+            StorePurchaseStockTransaction.item_id == item_id,
+            StorePurchaseStockTransaction.transaction_type == "RECEIPT",
+            StorePurchaseStockTransaction.receipt_line_id == None,
+            StorePurchaseStockTransaction.reference_no != None,
+            StorePurchaseStockTransaction.reference_no != "",
+        )
+        .order_by(StorePurchaseStockTransaction.transaction_date.desc(), StorePurchaseStockTransaction.id.desc())
+        .all()
+    )
+    for tx in manual_txs:
+        num = tx.reference_no
+        if num in mr_po_numbers:
+            # Already handled by actual Material Receipts (avoids duplicate manual entries)
+            continue
+        qty = float(tx.quantity or 0)
+        date_str = str(tx.transaction_date) if tx.transaction_date else None
+        rate = float(tx.rate or 0)
+        vendor = tx.vendor_name or item.vendor_name
+        uom = tx.original_uom or item.uom
+
+        if num not in po_map:
+            po_map[num] = {
+                "po_number": num,
+                "vendor_name": vendor,
+                "date": date_str,
+                "quantity": round(qty, 3),
+                "rate": rate,
+                "uom": uom,
+            }
+        else:
+            po_map[num]["quantity"] = round(po_map[num]["quantity"] + qty, 3)
+            if date_str and (not po_map[num]["date"] or date_str > po_map[num]["date"]):
+                po_map[num]["date"] = date_str
+            if rate and not po_map[num]["rate"]:
+                po_map[num]["rate"] = rate
 
     # Source 3: item.reference_no fallback
     if item.reference_no and item.reference_no not in po_map:
@@ -5601,8 +5708,9 @@ def item_po_numbers(item_id: int, _: User = Depends(store_user), db: Session = D
             "po_number": item.reference_no,
             "vendor_name": item.vendor_name,
             "date": str(item.receipt_date) if item.receipt_date else None,
-            "quantity": float(item.quantity or 0),
+            "quantity": round(float(item.quantity or 0), 3),
             "rate": float(item.rate or 0),
+            "uom": item.uom,
         }
 
     # Source 4: Direct PO line search by vendor + item description match
@@ -5623,8 +5731,9 @@ def item_po_numbers(item_id: int, _: User = Depends(store_user), db: Session = D
                             "po_number": po.order_number,
                             "vendor_name": po.supplier,
                             "date": str(po.created_at.date()) if getattr(po, "created_at", None) else None,
-                            "quantity": float(line.quantity or 0),
+                            "quantity": round(float(line.quantity or 0), 3),
                             "rate": float(line.unit_rate or 0),
+                            "uom": line.uom or item.uom,
                         }
                         break
         except Exception as e:
