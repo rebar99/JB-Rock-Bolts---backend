@@ -34,12 +34,20 @@ router = APIRouter(prefix="/api/hr", tags=["HR Department"])
 # Helpers
 # ─────────────────────────────────────────────
 
-VALID_STATUSES = {"P", "A", "H", "L", "PL", "UL", "WO", "HD", "TR"}
+VALID_STATUSES = {"P", "A", "H", "HD", "HOL", "HP", "L", "PL", "UL", "WO", "TR"}
 
 DEFAULT_SALARY_CONFIG = [
     ("working_days_per_month", "26", "Working days considered for full salary calculation"),
     ("half_day_factor", "0.5", "Half-day counts as this fraction of a full day"),
     ("overtime_rate_per_hour", "0", "Overtime rate per hour (Rs.)"),
+    ("ot_hours_divisor", "12", "OT hours divisor per day (daily working hours base, default 12)"),
+    ("pf_percentage", "12", "PF % of Basic Salary"),
+    ("esi_percentage", "0.75", "ESI % of Gross Salary (applied only if gross <= 21000)"),
+    ("hra_percentage", "40", "HRA % of Basic Salary"),
+    ("conveyance_allowance", "1600", "Monthly Conveyance Allowance (Rs.)"),
+    ("medical_allowance", "1250", "Monthly Medical Allowance (Rs.)"),
+    ("travel_allowance_rate", "0", "Travel Allowance per travel day (Rs.)"),
+    ("tds_percentage", "0", "TDS % of Gross Salary"),
 ]
 
 
@@ -110,6 +118,7 @@ def _employee_to_dict(emp: HREmployee, detail: bool = False) -> dict:
 
     return {
         "id": emp.id,
+        "display_order": getattr(emp, "display_order", 0) or 0,
         "employee_code": emp.employee_code,
         "name": emp.name,
         "designation": emp.designation,
@@ -184,6 +193,10 @@ class EmployeeUpdate(EmployeeCreate):
     name: Optional[str] = None
 
 
+class EmployeeReorderPayload(BaseModel):
+    employee_ids: List[int]
+
+
 class AttendanceMark(BaseModel):
     employee_id: int
     attendance_date: date
@@ -208,18 +221,30 @@ class SalaryGenerateRequest(BaseModel):
     allowances: Optional[float] = 0
     bonus: Optional[float] = 0
     advance_deduction: Optional[float] = 0
-    pf_deduction: Optional[float] = 0
+    pf_deduction: Optional[float] = None
+    esi_deduction: Optional[float] = None
+    tds_deduction: Optional[float] = None
     other_deductions: Optional[float] = 0
+    travel_allowance_amount: Optional[float] = 0
+    hra_amount: Optional[float] = None
+    conveyance_amount: Optional[float] = None
+    medical_amount: Optional[float] = None
     remarks: Optional[str] = None
 
 
 class SalaryUpdateRequest(BaseModel):
     overtime_amount: Optional[float] = None
+    travel_allowance_amount: Optional[float] = None
     allowances: Optional[float] = None
     bonus: Optional[float] = None
     advance_deduction: Optional[float] = None
     pf_deduction: Optional[float] = None
+    esi_deduction: Optional[float] = None
+    tds_deduction: Optional[float] = None
     other_deductions: Optional[float] = None
+    hra_amount: Optional[float] = None
+    conveyance_amount: Optional[float] = None
+    medical_amount: Optional[float] = None
     remarks: Optional[str] = None
 
 
@@ -412,8 +437,40 @@ def list_employees(
             | HREmployee.employee_code.ilike(f"%{search}%")
             | HREmployee.mobile.ilike(f"%{search}%")
         )
-    employees = q.order_by(HREmployee.id.asc()).all()
+    employees = q.order_by(HREmployee.display_order.asc(), HREmployee.id.asc()).all()
     return [_employee_to_dict(e, detail=False) for e in employees]
+
+
+@router.put("/employees/reorder")
+@router.post("/employees/reorder")
+def reorder_employees(
+    payload: EmployeeReorderPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not payload.employee_ids:
+        raise HTTPException(400, "employee_ids list cannot be empty")
+    for order_idx, emp_id in enumerate(payload.employee_ids, start=1):
+        db.query(HREmployee).filter(HREmployee.id == emp_id).update({"display_order": order_idx})
+    db.commit()
+
+    try:
+        log = SystemLog(
+            action="Employee Arrangement Updated",
+            entity_type="HREmployee",
+            details=f"Admin {current_user.name} saved new employee display arrangement for {len(payload.employee_ids)} employees.",
+            changed_fields=f"Reordered {len(payload.employee_ids)} employees",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
+
+    return {"success": True, "reordered_count": len(payload.employee_ids)}
 
 
 @router.post("/employees", status_code=201)
@@ -434,7 +491,8 @@ def create_employee(
             raise HTTPException(400, "Mobile number exactly 10 digits hona chahiye.")
         data["mobile"] = mob
     data["employee_code"] = code
-    emp = HREmployee(created_by=current_user.name, **data)
+    max_order = db.query(func.max(HREmployee.display_order)).scalar() or 0
+    emp = HREmployee(created_by=current_user.name, display_order=max_order + 1, **data)
     db.add(emp)
     db.commit()
     db.refresh(emp)
@@ -723,14 +781,20 @@ def get_monthly_attendance(
         q = q.filter(HREmployee.designation.ilike(f"%{designation}%"))
     if search:
         q = q.filter(HREmployee.name.ilike(f"%{search}%") | HREmployee.employee_code.ilike(f"%{search}%"))
-    employees = q.order_by(HREmployee.id.asc()).all()
+    employees = q.order_by(HREmployee.display_order.asc(), HREmployee.id.asc()).all()
 
     att_records = db.query(HRAttendance).filter(
         HRAttendance.month == month, HRAttendance.year == year,
     ).all()
     att_map: dict = {}
+    ot_map: dict = {}   # employee_id → {day → ot_hours}
     for rec in att_records:
         att_map.setdefault(rec.employee_id, {})[rec.attendance_date.day] = rec.status
+        if rec.ot_hours and rec.ot_hours > 0:
+            ot_map.setdefault(rec.employee_id, {})[rec.attendance_date.day] = {
+                "ot_hours": rec.ot_hours,
+                "ot_remarks": rec.ot_remarks,
+            }
 
     close_rec = db.query(HRAttendanceClose).filter(
         HRAttendanceClose.month == month, HRAttendanceClose.year == year,
@@ -747,12 +811,17 @@ def get_monthly_attendance(
             if ((year > inact.year) or (year == inact.year and month > inact.month)) and not emp_att:
                 continue
 
-        counts = {"P": 0, "A": 0, "H": 0, "PL": 0, "UL": 0, "TR": 0, "WO": 0, "HD": 0, "L": 0}
+        counts = {"P": 0, "A": 0, "H": 0, "HD": 0, "HOL": 0, "HP": 0, "PL": 0, "UL": 0, "TR": 0, "WO": 0, "L": 0}
         for s in emp_att.values():
             if s in counts:
                 counts[s] += 1
         # Merge legacy "L" into "PL" for clean unified display
         counts["PL"] += counts.get("L", 0)
+        # Merge legacy "HP" into "HD" (Half Day No Deduction)
+        counts["HD"] += counts.get("HP", 0)
+        # Total OT hours for this employee this month
+        emp_ot = ot_map.get(emp.id, {})
+        total_ot_hours = sum(v["ot_hours"] for v in emp_ot.values())
         result.append({
             "employee_id": emp.id,
             "employee_code": emp.employee_code,
@@ -762,6 +831,8 @@ def get_monthly_attendance(
             "is_active": emp.is_active,
             "inactive_date": inact.isoformat() if inact else None,
             "attendance": emp_att,
+            "ot": emp_ot,
+            "total_ot_hours": total_ot_hours if "total_ot_hours" in dir() else 0,
             "summary": counts,
         })
 
@@ -828,7 +899,19 @@ def mark_attendance(
 
     # ── Activity log ──────────────────────────────────────────────────────
     try:
-        status_names = {"P": "Present", "A": "Absent", "H": "Half Day", "PL": "Paid Leave", "L": "Paid Leave", "UL": "Unpaid Leave", "TR": "Travel/Tour", "WO": "Weekly Off", "HD": "Holiday"}
+        status_names = {
+            "P": "Present",
+            "A": "Absent",
+            "H": "Half Day (Deducted)",
+            "HD": "Half Day (No Deduction)",
+            "HOL": "Holiday",
+            "HP": "Half Day (No Deduction)",
+            "PL": "Paid Leave",
+            "L": "Paid Leave",
+            "UL": "Unpaid Leave",
+            "TR": "Travel/Tour",
+            "WO": "Weekly Off",
+        }
         new_name = status_names.get(payload.status, payload.status)
         old_name = status_names.get(old_status, old_status)
         if old_status != payload.status:
@@ -1018,8 +1101,119 @@ def reopen_attendance(
 
 
 # ─────────────────────────────────────────────
-# Salary Config
+# OT (Overtime) – Save & Fetch
 # ─────────────────────────────────────────────
+
+class OTMarkRequest(BaseModel):
+    employee_id: int
+    attendance_date: date
+    ot_hours: float
+    ot_remarks: Optional[str] = None
+
+
+@router.post("/attendance/ot")
+def mark_ot(
+    payload: OTMarkRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Save/update overtime hours for a specific employee & date.
+    Does NOT change the existing attendance status (P/A/TR etc.).
+    If no attendance record exists for that date, creates one (status kept as-is or we raise error).
+    """
+    if payload.attendance_date > date.today():
+        raise HTTPException(400, "Future dates ke liye OT mark nahi kar sakte.")
+
+    if payload.ot_hours < 0:
+        raise HTTPException(400, "OT hours negative nahi ho sakti.")
+
+    emp = db.get(HREmployee, payload.employee_id)
+    if not emp:
+        raise HTTPException(404, "Employee not found")
+    if not emp.is_active:
+        raise HTTPException(400, f"Cannot mark OT: {emp.name} is Inactive.")
+
+    # Check if month is locked
+    close_rec = db.query(HRAttendanceClose).filter(
+        HRAttendanceClose.month == payload.attendance_date.month,
+        HRAttendanceClose.year == payload.attendance_date.year,
+    ).first()
+    if close_rec and close_rec.is_closed:
+        raise HTTPException(403, "Attendance for this month is locked. Please reopen to add OT.")
+
+    existing = db.query(HRAttendance).filter(
+        HRAttendance.employee_id == payload.employee_id,
+        HRAttendance.attendance_date == payload.attendance_date,
+    ).first()
+
+    if existing:
+        # Update only OT fields — do NOT touch status
+        existing.ot_hours = payload.ot_hours if payload.ot_hours > 0 else None
+        existing.ot_remarks = payload.ot_remarks or None
+        existing.updated_by = current_user.name
+    else:
+        # Create a new record with no status (unmarked) but with OT hours
+        db.add(HRAttendance(
+            employee_id=payload.employee_id,
+            attendance_date=payload.attendance_date,
+            status="P",   # default to Present for OT days
+            month=payload.attendance_date.month,
+            year=payload.attendance_date.year,
+            ot_hours=payload.ot_hours if payload.ot_hours > 0 else None,
+            ot_remarks=payload.ot_remarks or None,
+            created_by=current_user.name,
+        ))
+
+    db.commit()
+
+    # Activity log
+    try:
+        dt_str = payload.attendance_date.strftime("%d-%b-%Y")
+        log = SystemLog(
+            action="OT Marked",
+            entity_type="HRAttendance",
+            entity_name=emp.name,
+            details=f"OT {payload.ot_hours} hrs for {emp.name} ({emp.employee_code}) on {dt_str} by {current_user.name}. Remarks: {payload.ot_remarks or '—'}",
+            changed_fields=f"{dt_str}: OT = {payload.ot_hours} hrs",
+            user=current_user.name,
+            workspace="HR",
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        notifications.broadcast(log)
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "employee_id": payload.employee_id,
+        "date": payload.attendance_date.isoformat(),
+        "ot_hours": payload.ot_hours,
+    }
+
+
+@router.delete("/attendance/ot")
+def clear_ot(
+    employee_id: int = Query(...),
+    attendance_date: date = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Clear OT hours for a specific employee & date."""
+    existing = db.query(HRAttendance).filter(
+        HRAttendance.employee_id == employee_id,
+        HRAttendance.attendance_date == attendance_date,
+    ).first()
+    if existing:
+        existing.ot_hours = None
+        existing.ot_remarks = None
+        existing.updated_by = current_user.name
+        db.commit()
+    return {"success": True}
+
+
+
 
 @router.get("/salary/config")
 def get_salary_config(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -1097,56 +1291,159 @@ def _calculate_salary(emp: HREmployee, month: int, year: int, cfg: dict, db: Ses
     travel = sum(1 for a in att_records if a.status == "TR")
     absent = sum(1 for a in att_records if a.status == "A")
     half = sum(1 for a in att_records if a.status == "H")
+    half_paid = sum(1 for a in att_records if a.status in ("HD", "HP"))
     paid_leave = sum(1 for a in att_records if a.status in ("L", "PL"))
     unpaid_leave = sum(1 for a in att_records if a.status == "UL")
     wo = sum(1 for a in att_records if a.status == "WO")
-    hd = sum(1 for a in att_records if a.status == "HD")
+    hd = sum(1 for a in att_records if a.status in ("HOL",))
 
     # IMPORTANT:
-    # 1) Weekly Off (WO), Holiday (HD), Paid Leave (PL/L), and Travel (TR) are 100% PAID (no salary cut).
+    # 1) Weekly Off (WO), Holiday (HD), Paid Leave (PL/L), Travel (TR), and Half Day (Paid/HP) are 100% PAID (no salary cut).
     # 2) Travel (TR) counts as Present on official tour/duty.
     # 3) Half Day (H) is paid half_day_factor (0.5), remainder (0.5) is deducted.
-    # 4) Unpaid Leave (UL) and Absent (A) have full day salary deducted (paise katenge).
-    total_present_days = round(present + travel + paid_leave + half * half_day_factor, 1)
-    total_paid_days = round(present + travel + paid_leave + wo + hd + half * half_day_factor, 1)
+    # 4) Half Day (HP) is 100% paid (no deduction).
+    # 5) Unpaid Leave (UL) and Absent (A) have full day salary deducted (paise katenge).
+    total_present_days = round(present + travel + paid_leave + half_paid + half * half_day_factor, 1)
+    total_paid_days = round(present + travel + paid_leave + wo + hd + half_paid + half * half_day_factor, 1)
 
     # Detect unmarked/missing days in the month (e.g. joined mid-month or unrecorded dates)
-    total_marked = present + travel + absent + half + paid_leave + unpaid_leave + wo + hd
+    total_marked = present + travel + absent + half + half_paid + paid_leave + unpaid_leave + wo + hd
     unmarked_days = max(0, days_in_month - total_marked)
 
     present_salary = float(emp.present_salary or 0)
-    per_day = round(present_salary / working_days, 2) if working_days else 0
+    # Per day salary based on actual calendar days in the salary month
+    per_day = int(round(present_salary / days_in_month)) if days_in_month else 0
 
     overtime = float(overrides.get("overtime_amount") or 0)
-    allowances = float(overrides.get("allowances") or 0)
+    allowances = float(overrides.get("allowances") or 0)   # kept for legacy/bonus use
     bonus = float(overrides.get("bonus") or 0)
 
-    # Deductions:
-    # WO, HD, and Paid Leave (PL) have ZERO deduction.
-    # Unpaid Leave (UL) and Absent (A) have full day per_day deduction.
-    absent_deduction = round(per_day * absent, 2)
-    unpaid_leave_deduction = round(per_day * unpaid_leave, 2)
-    half_deduction = round(per_day * half * (1 - half_day_factor), 2)
-    unmarked_deduction = round(per_day * unmarked_days, 2)
-    salary_deduction = round(absent_deduction + unpaid_leave_deduction + half_deduction + unmarked_deduction, 2)
+    # Deductions summary for information display:
+    absent_deduction = int(round(per_day * absent))
+    unpaid_leave_deduction = int(round(per_day * unpaid_leave))
+    half_deduction = int(round(per_day * half * (1 - half_day_factor)))
+    unmarked_deduction = int(round(per_day * unmarked_days))
+    salary_deduction = int(round(absent_deduction + unpaid_leave_deduction + half_deduction + unmarked_deduction))
 
-    # Basic salary earned:
-    if absent == 0 and unpaid_leave == 0 and half == 0 and unmarked_days == 0:
-        basic_salary = present_salary
-        salary_deduction = 0.0
+    # ── EXCEL SALARY SHEET CALCULATION LOGIC ─────────────────────────────
+    # 1. Monthly Component Calculations
+    # Medical Allowance = 5% of Present Salary
+    monthly_medical = int(round(present_salary * 0.05))
+
+    # Basic Salary & CONV (Conveyance Allowance) & HRA:
+    # If Present Salary > 25,000:
+    #   Basic = 50% of Present Salary
+    #   HRA = 25% of Present Salary
+    #   CONV = 20% of Present Salary
+    # If Present Salary <= 25,000:
+    #   Basic = Fixed ₹12,750
+    #   CONV = 10% of Present Salary
+    #   HRA = Present Salary - Basic Salary - CONV - Medical Allowance
+    if present_salary > 25000:
+        monthly_conveyance = int(round(present_salary * 0.20))
+        monthly_basic = int(round(present_salary * 0.50))
+        monthly_hra = int(round(present_salary * 0.25))
     else:
-        basic_salary = round(max(0.0, present_salary - salary_deduction), 2)
+        monthly_conveyance = int(round(present_salary * 0.10))
+        monthly_basic = 12750 if present_salary > 0 else 0
+        calc_hra = int(round(present_salary - monthly_basic - monthly_conveyance - monthly_medical))
+        monthly_hra = max(0, calc_hra)
 
-    # Gross salary = Monthly fixed salary + Overtime + Allowances + Bonus
-    gross = round(present_salary + overtime + allowances + bonus, 2)
+    monthly_gross = int(round(monthly_basic + monthly_hra + monthly_conveyance + monthly_medical))
 
-    advance = float(overrides.get("advance_deduction") or 0)
-    pf_deduction = float(overrides.get("pf_deduction") or 0)
-    other = float(overrides.get("other_deductions") or 0)
+    # 2. Attendance-Based Payable Calculation
+    # Formula: Payable Component = Monthly Component * Paid Days / Total Days in Salary Month
+    attendance_ratio = (total_paid_days / days_in_month) if days_in_month > 0 else 0.0
 
-    # Total deductions to subtract from gross
-    total_deductions = round(salary_deduction + advance + pf_deduction + other, 2)
-    net = round(max(0.0, gross - total_deductions), 2)
+    # Payable components (can be overridden by user if custom amount entered)
+    if overrides.get("basic_amount") is not None:
+        payable_basic = int(round(float(overrides["basic_amount"])))
+    else:
+        payable_basic = int(round(monthly_basic * attendance_ratio))
+
+    if overrides.get("hra_amount") is not None:
+        payable_hra = int(round(float(overrides["hra_amount"])))
+    else:
+        payable_hra = int(round(monthly_hra * attendance_ratio))
+
+    if overrides.get("conveyance_amount") is not None:
+        payable_conveyance = int(round(float(overrides["conveyance_amount"])))
+    else:
+        payable_conveyance = int(round(monthly_conveyance * attendance_ratio))
+
+    if overrides.get("medical_amount") is not None:
+        payable_medical = int(round(float(overrides["medical_amount"])))
+    else:
+        payable_medical = int(round(monthly_medical * attendance_ratio))
+
+    # Gross Salary = Basic Salary + HRA + CONV + Medical Allowance
+    gross_salary = int(round(payable_basic + payable_hra + payable_conveyance + payable_medical))
+
+    # Travel Allowance (additional earning)
+    if overrides.get("travel_allowance_amount") is not None:
+        travel_allowance_amount = int(round(float(overrides["travel_allowance_amount"])))
+    else:
+        travel_rate = float(cfg.get("travel_allowance_rate", 0))
+        travel_allowance_amount = int(round(travel * travel_rate))
+
+    # OT Amount Calculation:
+    # Formula: (Monthly Salary / Days in Month / OT Hours Divisor) × Approved OT Hours
+    # OT Hours Divisor = configurable (default 12 hours/day)
+    total_ot_hours = 0.0
+    if overrides.get("overtime_amount") is not None and float(overrides["overtime_amount"] or 0) > 0:
+        # Manual override from salary modal
+        overtime = int(round(float(overrides["overtime_amount"])))
+    else:
+        # Auto-calculate from attendance OT hours
+        ot_hours_divisor = float(cfg.get("ot_hours_divisor", 12))
+        # Fetch total OT hours for this employee & month from attendance records
+        ot_records = db.query(HRAttendance).filter(
+            HRAttendance.employee_id == emp.id,
+            HRAttendance.month == month,
+            HRAttendance.year == year,
+            HRAttendance.ot_hours != None,
+        ).all()
+        total_ot_hours = sum(float(r.ot_hours or 0) for r in ot_records)
+        if total_ot_hours > 0 and days_in_month > 0 and ot_hours_divisor > 0:
+            overtime = int(round((present_salary / days_in_month / ot_hours_divisor) * total_ot_hours))
+        else:
+            overtime = 0
+
+    # Total Earnings = Gross + OT + TA
+    total_earnings = int(round(gross_salary + overtime + travel_allowance_amount))
+
+    # 3. Deductions:
+    # PF = 12% of Payable Basic Salary (or configured pf_percentage)
+    # PF Deduction Logic:
+    # - If monthly Basic Salary > ₹25,000 → Fixed ₹3,000
+    # - If monthly Basic Salary ≤ ₹25,000 → 12% of payable Basic Salary
+    if overrides.get("pf_deduction") is not None:
+        pf_deduction = int(round(float(overrides["pf_deduction"])))
+    else:
+        if monthly_basic > 25000:
+            pf_deduction = 3000
+        else:
+            pf_deduction = int(round(payable_basic * 12 / 100))
+
+    # ESI = 0.75% of Gross Earned Salary (always applied)
+    if overrides.get("esi_deduction") is not None:
+        esi_deduction = int(round(float(overrides["esi_deduction"])))
+    else:
+        esi_deduction = int(round(gross_salary * 0.75 / 100))
+
+    # TDS on Gross Salary (or user override)
+    if overrides.get("tds_deduction") is not None:
+        tds_deduction = int(round(float(overrides["tds_deduction"])))
+    else:
+        tds_pct = float(cfg.get("tds_percentage", 0))
+        tds_deduction = int(round(gross_salary * tds_pct / 100))
+
+    advance = int(round(float(overrides.get("advance_deduction") or 0)))
+    other = int(round(float(overrides.get("other_deductions") or 0)))
+
+    # Total deductions = PF + ESI + Advance + TDS + Other
+    total_deductions = int(round(pf_deduction + esi_deduction + advance + tds_deduction + other))
+    net = int(round(max(0, total_earnings - total_deductions)))
 
     return {
         "present_salary": present_salary,
@@ -1164,19 +1461,39 @@ def _calculate_salary(emp: HREmployee, month: int, year: int, cfg: dict, db: Ses
         "total_paid_days": total_paid_days,
         "unmarked_days": unmarked_days,
         "per_day_salary": per_day,
-        "basic_salary": basic_salary,
+        # Monthly Components (Structure)
+        "monthly_basic": monthly_basic,
+        "monthly_hra": monthly_hra,
+        "monthly_conveyance": monthly_conveyance,
+        "monthly_medical": monthly_medical,
+        "monthly_gross": monthly_gross,
+        # Payable Components (Attendance-adjusted)
+        "base_salary": payable_basic,
+        "basic_salary": payable_basic,
+        "hra": payable_hra,
+        "conveyance": payable_conveyance,
+        "conveyance_amount": payable_conveyance,
+        "medical_allowance": payable_medical,
+        "medical_amount": payable_medical,
+        "gross_salary": gross_salary,
         "overtime_amount": overtime,
+        "total_ot_hours": total_ot_hours if "total_ot_hours" in dir() else 0,
+        "travel_allowance": travel_allowance_amount,
+        "total_earnings": total_earnings,
+        # Deductions
         "allowances": allowances,
         "bonus": bonus,
-        "gross_salary": gross,
         "absent_deduction": absent_deduction,
         "unpaid_leave_deduction": unpaid_leave_deduction,
         "half_deduction": half_deduction,
         "unmarked_deduction": unmarked_deduction,
-        "salary_deduction": salary_deduction,
+        "salary_deduction": 0.0,
+        "attendance_deduction_info": salary_deduction,
         "advance_deduction": advance,
         "other_deductions": other,
         "pf_deduction": pf_deduction,
+        "esi_deduction": esi_deduction,
+        "tds_deduction": tds_deduction,
         "total_deductions": total_deductions,
         "net_salary": net,
     }
@@ -1198,13 +1515,20 @@ def _salary_to_dict(s: HRSalary) -> dict:
         "weekly_offs": float(s.weekly_offs or 0),
         "holidays": float(s.holidays or 0),
         "basic_salary": float(s.basic_salary or 0),
+        "hra": float(s.hra or 0),
+        "conveyance": float(s.conveyance or 0),
+        "medical_allowance": float(s.medical_allowance or 0),
         "overtime_amount": float(s.overtime_amount or 0),
         "allowances": float(s.allowances or 0),
         "bonus": float(s.bonus or 0),
+        "travel_allowance": float(s.travel_allowance or 0),
+        "total_earnings": float(s.total_earnings or 0),
         "gross_salary": float(s.gross_salary or 0),
         "salary_deduction": float(s.salary_deduction or 0),
         "advance_deduction": float(s.advance_deduction or 0),
         "pf_deduction": float(s.pf_deduction or 0),
+        "esi_deduction": float(s.esi_deduction or 0),
+        "tds_deduction": float(s.tds_deduction or 0),
         "other_deductions": float(s.other_deductions or 0),
         "total_deductions": float(s.total_deductions or 0),
         "net_salary": float(s.net_salary or 0),
@@ -1225,6 +1549,10 @@ def _salary_to_dict(s: HRSalary) -> dict:
         d["employee_code"] = s.employee.employee_code
         d["designation"] = s.employee.designation
         d["location"] = s.employee.location
+        d["bank_account_number"] = s.employee.bank_account_number or ""
+        d["bank_ifsc"] = s.employee.bank_ifsc or ""
+        d["bank_name"] = s.employee.bank_name or ""
+        d["display_order"] = getattr(s.employee, "display_order", 0) or 0
     return d
 
 
@@ -1236,8 +1564,15 @@ class SalaryPreviewRequest(BaseModel):
     allowances: Optional[float] = 0
     bonus: Optional[float] = 0
     advance_deduction: Optional[float] = 0
-    pf_deduction: Optional[float] = 0
+    pf_deduction: Optional[float] = None
+    esi_deduction: Optional[float] = None
+    tds_deduction: Optional[float] = None
     other_deductions: Optional[float] = 0
+    travel_allowance_amount: Optional[float] = 0
+    hra_amount: Optional[float] = None
+    conveyance_amount: Optional[float] = None
+    medical_amount: Optional[float] = None
+    force_recalc: bool = False
 
 
 @router.post("/salary/preview")
@@ -1267,10 +1602,11 @@ def preview_salary(
     travel = sum(1 for a in att_records if a.status == "TR")
     absent = sum(1 for a in att_records if a.status == "A")
     half = sum(1 for a in att_records if a.status == "H")
+    half_paid = sum(1 for a in att_records if a.status in ("HD", "HP"))
     paid_leave = sum(1 for a in att_records if a.status in ("L", "PL"))
     unpaid_leave = sum(1 for a in att_records if a.status == "UL")
     wo = sum(1 for a in att_records if a.status == "WO")
-    hd = sum(1 for a in att_records if a.status == "HD")
+    hd = sum(1 for a in att_records if a.status in ("HOL",))
 
     cfg = _get_config(db)
     overrides = {
@@ -1279,7 +1615,13 @@ def preview_salary(
         "bonus": payload.bonus,
         "advance_deduction": payload.advance_deduction,
         "pf_deduction": payload.pf_deduction,
+        "esi_deduction": payload.esi_deduction,
+        "tds_deduction": payload.tds_deduction,
         "other_deductions": payload.other_deductions,
+        "travel_allowance_amount": payload.travel_allowance_amount,
+        "hra_amount": payload.hra_amount,
+        "conveyance_amount": payload.conveyance_amount,
+        "medical_amount": payload.medical_amount,
     }
     calc = _calculate_salary(emp, payload.month, payload.year, cfg, db, overrides)
 
@@ -1289,6 +1631,25 @@ def preview_salary(
         HRSalary.month == payload.month,
         HRSalary.year == payload.year,
     ).first()
+
+    if existing_salary and not payload.force_recalc and payload.hra_amount is None and payload.conveyance_amount is None and payload.medical_amount is None:
+        # If salary already saved and no custom overrides passed in preview, reflect the actual saved values
+        calc["hra"] = float(existing_salary.hra if existing_salary.hra is not None else 0)
+        calc["conveyance"] = float(existing_salary.conveyance if existing_salary.conveyance is not None else 0)
+        calc["conveyance_amount"] = calc["conveyance"]
+        calc["medical_allowance"] = float(existing_salary.medical_allowance if existing_salary.medical_allowance is not None else 0)
+        calc["medical_amount"] = calc["medical_allowance"]
+        calc["gross_salary"] = float(existing_salary.gross_salary or 0)
+        calc["overtime_amount"] = float(existing_salary.overtime_amount or 0)
+        calc["travel_allowance"] = float(existing_salary.travel_allowance or 0)
+        calc["total_earnings"] = float(existing_salary.total_earnings or 0)
+        calc["pf_deduction"] = float(existing_salary.pf_deduction or 0)
+        calc["esi_deduction"] = float(existing_salary.esi_deduction or 0)
+        calc["tds_deduction"] = float(existing_salary.tds_deduction or 0)
+        calc["advance_deduction"] = float(existing_salary.advance_deduction or 0)
+        calc["other_deductions"] = float(existing_salary.other_deductions or 0)
+        calc["total_deductions"] = float(existing_salary.total_deductions or 0)
+        calc["net_salary"] = float(existing_salary.net_salary or 0)
 
     close_rec = db.query(HRAttendanceClose).filter(
         HRAttendanceClose.month == payload.month,
@@ -1321,6 +1682,7 @@ def preview_salary(
             "travel": travel,
             "absent": absent,
             "half_day": half,
+            "half_day_paid": half_paid,
             "paid_leave": paid_leave,
             "unpaid_leave": unpaid_leave,
             "weekly_off": wo,
@@ -1343,13 +1705,6 @@ def generate_salary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    close_rec = db.query(HRAttendanceClose).filter(
-        HRAttendanceClose.month == payload.month,
-        HRAttendanceClose.year == payload.year,
-    ).first()
-    if not close_rec or not close_rec.is_closed:
-        raise HTTPException(400, f"Attendance for {payload.month}/{payload.year} must be verified & closed first.")
-
     emp = db.get(HREmployee, payload.employee_id)
     if not emp:
         raise HTTPException(404, "Employee not found")
@@ -1371,7 +1726,13 @@ def generate_salary(
         "bonus": payload.bonus,
         "advance_deduction": payload.advance_deduction,
         "pf_deduction": payload.pf_deduction,
+        "esi_deduction": payload.esi_deduction,
+        "tds_deduction": payload.tds_deduction,
         "other_deductions": payload.other_deductions,
+        "travel_allowance_amount": payload.travel_allowance_amount,
+        "hra_amount": payload.hra_amount,
+        "conveyance_amount": payload.conveyance_amount,
+        "medical_amount": payload.medical_amount,
     }
     calc = _calculate_salary(emp, payload.month, payload.year, cfg, db, overrides)
 
@@ -1428,7 +1789,7 @@ def list_salaries(
         q = q.filter(HRSalary.payment_status == status)
     if employee_id:
         q = q.filter(HRSalary.employee_id == employee_id)
-    salaries = q.order_by(HRSalary.year.desc(), HRSalary.month.desc(), HRSalary.id.desc()).all()
+    salaries = q.order_by(HRSalary.year.desc(), HRSalary.month.desc(), HREmployee.display_order.asc(), HREmployee.id.asc()).all()
     return [_salary_to_dict(s) for s in salaries]
 
 
@@ -1461,13 +1822,29 @@ def update_salary(
     if s.payment_status == "Paid":
         raise HTTPException(400, "Cannot edit a paid salary record.")
     for k, v in payload.model_dump(exclude_unset=True).items():
-        if v is not None:
+        if v is not None and hasattr(s, k):
             setattr(s, k, v)
-    gross = float(s.basic_salary or 0) + float(s.overtime_amount or 0) + float(s.allowances or 0) + float(s.bonus or 0)
+    if payload.hra_amount is not None:
+        s.hra = payload.hra_amount
+    if payload.conveyance_amount is not None:
+        s.conveyance = payload.conveyance_amount
+    if payload.medical_amount is not None:
+        s.medical_allowance = payload.medical_amount
+    if payload.travel_allowance_amount is not None:
+        s.travel_allowance = payload.travel_allowance_amount
+
+    # Recalculate gross = base+hra+conv+med
+    base_sal = float(s.basic_salary or 0)
+    gross = int(round(base_sal + float(s.hra or 0) + float(s.conveyance or 0) + float(s.medical_allowance or 0)))
     s.gross_salary = gross
-    total_ded = float(s.salary_deduction or 0) + float(s.advance_deduction or 0) + float(s.pf_deduction or 0) + float(s.other_deductions or 0)
+    total_earn = int(round(gross + float(s.overtime_amount or 0) + float(s.travel_allowance or 0)))
+    s.total_earnings = total_earn
+    s.salary_deduction = 0.0
+    total_ded = int(round(float(s.advance_deduction or 0) +
+                       float(s.pf_deduction or 0) + float(s.esi_deduction or 0) +
+                       float(s.tds_deduction or 0) + float(s.other_deductions or 0)))
     s.total_deductions = total_ded
-    s.net_salary = round(gross - total_ded, 2)
+    s.net_salary = int(round(max(0.0, total_earn - total_ded)))
     db.commit()
     db.refresh(s)
 
@@ -1696,14 +2073,20 @@ def salary_slip(sal_id: int, db: Session = Depends(get_db), current_user: User =
             },
             "earnings": {
                 "basic_salary": float(s.basic_salary or 0),
-                "overtime": float(s.overtime_amount or 0),
-                "allowances": float(s.allowances or 0),
-                "bonus": float(s.bonus or 0),
+                "hra": float(s.hra or 0),
+                "conveyance": float(s.conveyance or 0),
+                "medical_allowance": float(s.medical_allowance or 0),
                 "gross_salary": float(s.gross_salary or 0),
+                "overtime": float(s.overtime_amount or 0),
+                "travel_allowance": float(s.travel_allowance or 0),
+                "total_earnings": float(s.total_earnings or 0),
             },
             "deductions": {
                 "salary_deduction": float(s.salary_deduction or 0),
                 "advance_deduction": float(s.advance_deduction or 0),
+                "pf_deduction": float(s.pf_deduction or 0),
+                "esi_deduction": float(s.esi_deduction or 0),
+                "tds_deduction": float(s.tds_deduction or 0),
                 "other_deductions": float(s.other_deductions or 0),
                 "total_deductions": float(s.total_deductions or 0),
             },

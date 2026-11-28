@@ -1458,6 +1458,7 @@ class StoreVendor(Base):
 class HREmployee(Base):
     __tablename__ = "hr_employees"
     id = Column(Integer, primary_key=True, index=True)
+    display_order = Column(Integer, default=0, nullable=True, index=True)
     employee_code = Column(String(20), unique=True, nullable=False, index=True)
     name = Column(String(150), nullable=False)
     designation = Column(String(100))
@@ -1502,10 +1503,12 @@ class HRAttendance(Base):
     id = Column(Integer, primary_key=True, index=True)
     employee_id = Column(Integer, ForeignKey("hr_employees.id"), nullable=False, index=True)
     attendance_date = Column(Date, nullable=False)
-    status = Column(String(5), nullable=False, default="P")  # P, A, H, L, WO, HD
+    status = Column(String(5), nullable=False, default="P")  # P, A, H, L, WO, HD, TR, PL, UL
     month = Column(Integer, nullable=False)
     year = Column(Integer, nullable=False)
     is_locked = Column(Boolean, default=False)
+    ot_hours = Column(Float, nullable=True, default=None)   # Overtime hours for this date
+    ot_remarks = Column(Text, nullable=True, default=None)  # Remarks for OT entry
     created_by = Column(String(100))
     updated_by = Column(String(100))
     created_at = Column(DateTime, server_default=func.now())
@@ -1556,15 +1559,22 @@ class HRSalary(Base):
     weekly_offs = Column(Numeric(5, 1), default=0)
     holidays = Column(Numeric(5, 1), default=0)
     # Earnings
-    basic_salary = Column(Numeric(12, 2), default=0)
+    basic_salary = Column(Numeric(12, 2), default=0)   # structural base (50% rule or 12750)
+    hra = Column(Numeric(12, 2), default=0)
+    conveyance = Column(Numeric(12, 2), default=0)
+    medical_allowance = Column(Numeric(12, 2), default=0)
     overtime_amount = Column(Numeric(12, 2), default=0)
     allowances = Column(Numeric(12, 2), default=0)
     bonus = Column(Numeric(12, 2), default=0)
-    gross_salary = Column(Numeric(12, 2), default=0)
+    travel_allowance = Column(Numeric(12, 2), default=0)
+    total_earnings = Column(Numeric(12, 2), default=0)
+    gross_salary = Column(Numeric(12, 2), default=0)   # basic+hra+conv+med
     # Deductions
     salary_deduction = Column(Numeric(12, 2), default=0)
     advance_deduction = Column(Numeric(12, 2), default=0)
     pf_deduction = Column(Numeric(12, 2), default=0)
+    esi_deduction = Column(Numeric(12, 2), default=0)
+    tds_deduction = Column(Numeric(12, 2), default=0)
     other_deductions = Column(Numeric(12, 2), default=0)
     total_deductions = Column(Numeric(12, 2), default=0)
     net_salary = Column(Numeric(12, 2), default=0)
