@@ -651,23 +651,57 @@ async def lifespan(app: FastAPI):
                         logger.warning(f"[Migration] store_purchase_order_approvals.{col}: {_e}")
 
             # Safely migrate hr_salaries columns if table exists
-            for col, dtype in [("weekly_offs", "DECIMAL(5,1) DEFAULT 0"), ("holidays", "DECIMAL(5,1) DEFAULT 0")]:
+            for col, dtype in [
+                ("weekly_offs", "DECIMAL(5,1) DEFAULT 0"),
+                ("holidays", "DECIMAL(5,1) DEFAULT 0"),
+                ("pf_deduction", "DECIMAL(12,2) DEFAULT 0"),
+                ("hra", "DECIMAL(12,2) DEFAULT 0"),
+                ("conveyance", "DECIMAL(12,2) DEFAULT 0"),
+                ("medical_allowance", "DECIMAL(12,2) DEFAULT 0"),
+                ("travel_allowance", "DECIMAL(12,2) DEFAULT 0"),
+                ("total_earnings", "DECIMAL(12,2) DEFAULT 0"),
+                ("esi_deduction", "DECIMAL(12,2) DEFAULT 0"),
+                ("tds_deduction", "DECIMAL(12,2) DEFAULT 0"),
+                ("advance_deduction", "DECIMAL(12,2) DEFAULT 0"),
+                ("other_deductions", "DECIMAL(12,2) DEFAULT 0"),
+            ]:
                 try:
                     conn.execute(text(f"SELECT {col} FROM hr_salaries LIMIT 1"))
                 except Exception:
                     try:
                         conn.execute(text(f"ALTER TABLE hr_salaries ADD COLUMN {col} {dtype}"))
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.warning(f"Could not add {col} to hr_salaries: {_e}")
 
             # Safely migrate hr_employees columns
-            try:
-                conn.execute(text("SELECT qualification_doc_url FROM hr_employees LIMIT 1"))
-            except Exception:
+            for col, dtype in [
+                ("display_order", "INT DEFAULT 0 NULL"),
+                ("qualification_doc_url", "VARCHAR(500) NULL"),
+                ("inactive_date", "DATE NULL"),
+                ("gender", "VARCHAR(20) NULL"),
+                ("marital_status", "VARCHAR(30) NULL"),
+                ("email", "VARCHAR(150) NULL"),
+            ]:
                 try:
-                    conn.execute(text("ALTER TABLE hr_employees ADD COLUMN qualification_doc_url VARCHAR(500) NULL"))
+                    conn.execute(text(f"SELECT {col} FROM hr_employees LIMIT 1"))
                 except Exception:
-                    pass
+                    try:
+                        conn.execute(text(f"ALTER TABLE hr_employees ADD COLUMN {col} {dtype}"))
+                    except Exception as _e:
+                        logger.warning(f"Could not add {col} to hr_employees: {_e}")
+
+            # Safely migrate hr_attendance columns (Overtime OT)
+            for col, dtype in [
+                ("ot_hours", "FLOAT NULL DEFAULT NULL"),
+                ("ot_remarks", "TEXT NULL DEFAULT NULL"),
+            ]:
+                try:
+                    conn.execute(text(f"SELECT {col} FROM hr_attendance LIMIT 1"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE hr_attendance ADD COLUMN {col} {dtype}"))
+                    except Exception as _e:
+                        logger.warning(f"Could not add {col} to hr_attendance: {_e}")
             # ── po_prepared_by_config (legacy singleton) ─────────────────────────
             try:
                 conn.execute(text("SELECT id FROM po_prepared_by_config LIMIT 1"))
